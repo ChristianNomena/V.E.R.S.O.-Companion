@@ -1,0 +1,7 @@
+flet[all]
+plyer
+pyperclip
+python-dotenv
+requests
+sqlmodel
+watchdog
