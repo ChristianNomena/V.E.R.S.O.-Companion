@@ -1,4 +1,11 @@
-pycache/
+# Environments
+.venv/
+venv/
+ENV/
+env/
+
+# Byte-compiled / optimized files
+__pycache__/
 *.py[cod]
 *$py.class
 *.so
@@ -21,6 +28,10 @@ dist/
 
 .flet/
 flet_build/
+
+# Generated runtime deliverables
+deliverables/*
+!deliverables/.gitkeep
 
 .DS_Store
 .AppleDouble
