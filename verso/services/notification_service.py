@@ -1,8 +1,9 @@
 """
 V.E.R.S.O. - Notification Service
-Provides reliable native desktop notifications across platforms,
-with a dedicated rock-solid macOS implementation (AppleScript)
-and graceful fallbacks.
+Provides reliable native desktop notifications across platforms:
+- macOS: AppleScript (osascript) with native sounds and subtitles
+- Windows: Native PowerShell Toast with fallback to Plyer and console
+- Linux: Native notify-send with fallback to Plyer and console
 """
 
 import logging
@@ -71,18 +72,39 @@ class NotificationService:
                 text=True,
                 timeout=5,
             )
-            if result.returncode == 0:
-                return True
-            else:
-                logger.warning("osascript notification failed: %s", result.stderr.strip())
-                return False
+            return result.returncode == 0
         except Exception as exc:
             logger.error("Failed to send macOS notification: %s", exc)
             return False
 
     @classmethod
     def _notify_windows(cls, title: str, message: str) -> bool:
-        """Windows notification using plyer with graceful fallback."""
+        """Windows notification using native PowerShell Toast or Plyer."""
+        # 1. Native Windows PowerShell toast notification (zero external dependencies)
+        try:
+            escaped_title = title.replace("'", "''")
+            escaped_msg = message.replace("'", "''")
+            ps_script = f"""
+            [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] > $null
+            $template = [Windows.UI.Notifications.ToastTemplateType]::ToastText02
+            $xml = [Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent($template)
+            $text = $xml.GetElementsByTagName('text')
+            $text[0].AppendChild($xml.CreateTextNode('{escaped_title}')) > $null
+            $text[1].AppendChild($xml.CreateTextNode('{escaped_msg}')) > $null
+            $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+            [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('V.E.R.S.O.').Show($toast)
+            """
+            res = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", ps_script],
+                capture_output=True,
+                timeout=5,
+            )
+            if res.returncode == 0:
+                return True
+        except Exception as exc:
+            logger.debug("PowerShell toast notification failed: %s", exc)
+
+        # 2. Plyer fallback
         try:
             from plyer import notification
 
@@ -93,14 +115,16 @@ class NotificationService:
                 timeout=5,
             )
             return True
-        except Exception as exc:
-            logger.warning("Windows plyer notification failed (%s), logging to console.", exc)
-            print(f"[V.E.R.S.O. Notification] {title}: {message}")
-            return False
+        except Exception:
+            pass
+
+        print(f"[V.E.R.S.O. Notification] {title}: {message}")
+        return False
 
     @classmethod
     def _notify_linux(cls, title: str, message: str) -> bool:
-        """Linux notification using notify-send or plyer."""
+        """Linux notification using notify-send or Plyer."""
+        # 1. Native notify-send command
         try:
             res = subprocess.run(
                 ["notify-send", title, message],
@@ -112,6 +136,7 @@ class NotificationService:
         except Exception:
             pass
 
+        # 2. Plyer fallback
         try:
             from plyer import notification
 
@@ -122,25 +147,8 @@ class NotificationService:
                 timeout=5,
             )
             return True
-        except Exception as exc:
-            logger.warning("Linux notification failed (%s), logging to console.", exc)
-            print(f"[V.E.R.S.O. Notification] {title}: {message}")
-            return False
+        except Exception:
+            pass
 
-
-if __name__ == "__main__":
-    import sys
-
-    print("Testing NotificationService on", platform.system())
-    success = NotificationService.notify(
-        title="V.E.R.S.O.",
-        message="System monitor active in the background.",
-        subtitle="Synchronization successful",
-        sound=True,
-    )
-    if success:
-        print("✅ Notification delivered successfully!")
-        sys.exit(0)
-    else:
-        print("❌ Notification failed.")
-        sys.exit(1)
+        print(f"[V.E.R.S.O. Notification] {title}: {message}")
+        return False

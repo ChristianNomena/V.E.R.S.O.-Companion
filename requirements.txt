@@ -1,7 +1,5 @@
-flet[all]
-plyer
-pyperclip
-python-dotenv
-requests
+flet
 sqlmodel
-watchdog
+pyperclip
+requests
+python-dotenv

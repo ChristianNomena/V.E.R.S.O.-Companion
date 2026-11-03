@@ -6,7 +6,6 @@ Executes autonomous ghost tasks on the Verso in non-blocking background threads.
 import logging
 import os
 import threading
-from datetime import datetime
 from typing import Callable, Optional
 
 from verso.services.muse_client import MuseClient
@@ -43,28 +42,39 @@ class WorkerManager:
     def _run_task(self, trigger_source: str, context_details: str) -> None:
         try:
             if self.on_status_change:
-                self.on_status_change(f"Verso at work: analyzing {trigger_source}...")
+                self.on_status_change(f"Verso at work: processing {trigger_source}...")
 
             # 1. Ask Muse AI (or mock fallback)
-            prompt = f"Generate proactive assistance for the user regarding: {context_details}"
+            prompt = f"Analyze incoming message and draft response: {context_details}"
             result = self.muse_client.generate_response(prompt, context=context_details)
 
-            # 2. Write deliverable file
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filename = f"deliverable_{timestamp}.md"
+            # 2. Write deliverable file (SLACK_DRAFT.md for Slack intentions)
+            filename = (
+                "SLACK_DRAFT.md"
+                if trigger_source == "SLACK_INTENT"
+                else "DELIVERABLE.md"
+            )
             filepath = os.path.join(self.deliverables_dir, filename)
 
-            content = result.get("content", f"# V.E.R.S.O. Deliverable\n\nGenerated for {context_details}\n")
+            content = result.get(
+                "content",
+                f"# V.E.R.S.O. Deliverable\n\nGenerated for {context_details}\n",
+            )
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(content)
 
-            notification_text = result.get("notification", "V.E.R.S.O. has completed a background task.")
+            notification_text = result.get(
+                "notification",
+                f"Deliverable ready in {self.deliverables_dir}/{filename}",
+            )
 
-            # 3. Notify user (native notification)
+            # 3. Notify user with native macOS banner and chime
             NotificationService.notify(
                 title="V.E.R.S.O.",
                 message=notification_text,
-                subtitle="Backstage deliverable ready",
+                subtitle="Slack Intent Handled"
+                if trigger_source == "SLACK_INTENT"
+                else "Backstage Task Ready",
                 sound=True,
             )
 

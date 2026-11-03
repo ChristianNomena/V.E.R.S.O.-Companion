@@ -1,10 +1,12 @@
 """
 V.E.R.S.O. - Window Sensor
 Lightweight cross-platform active window and application detector,
-optimized for macOS (AppleScript / System Events) with Windows & Linux support.
+supporting macOS (AppleScript / System Events), Windows (Win32 API via ctypes),
+and Linux (xdotool).
 """
 
 import logging
+import os
 import platform
 import subprocess
 from dataclasses import dataclass
@@ -16,6 +18,7 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class WindowInfo:
     """Represents the currently active application and window."""
+
     app_name: str
     window_title: str = ""
 
@@ -64,7 +67,7 @@ class WindowSensor:
         Reads the active app and window title on macOS.
         Uses AppleScript without blocking, handling apps with or without Accessibility rights.
         """
-        script = '''
+        script = """
 tell application "System Events"
     set frontApp to first application process whose frontmost is true
     set appName to name of frontApp
@@ -74,7 +77,6 @@ tell application "System Events"
     end try
 end tell
 
--- Optional browser-specific fallback if window title is empty
 if winTitle is "" then
     if appName is "Safari" then
         try
@@ -88,7 +90,7 @@ if winTitle is "" then
 end if
 
 return appName & "|||" & winTitle
-'''
+"""
         try:
             result = subprocess.run(
                 ["osascript", "-e", script],
@@ -101,8 +103,7 @@ return appName & "|||" & winTitle
                 app_name = parts[0].strip() if len(parts) > 0 else ""
                 win_title = parts[1].strip() if len(parts) > 1 else ""
                 return WindowInfo(app_name=app_name, window_title=win_title)
-            else:
-                return WindowInfo(app_name="Unknown", window_title="")
+            return WindowInfo(app_name="Unknown", window_title="")
         except subprocess.TimeoutExpired:
             logger.warning("Timeout while detecting macOS active window")
             return WindowInfo(app_name="Timeout", window_title="")
@@ -112,27 +113,46 @@ return appName & "|||" & winTitle
 
     @classmethod
     def _get_windows_window(cls) -> WindowInfo:
-        """Reads the active window on Windows using ctypes."""
+        """Reads the active window and process name on Windows using ctypes."""
         try:
             import ctypes
+
             user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
             hwnd = user32.GetForegroundWindow()
             if not hwnd:
                 return WindowInfo(app_name="Desktop", window_title="")
 
+            # Get Window Title
             length = user32.GetWindowTextLengthW(hwnd)
             buffer = ctypes.create_unicode_buffer(length + 1)
             user32.GetWindowTextW(hwnd, buffer, length + 1)
             title = buffer.value.strip()
 
-            return WindowInfo(app_name="Windows", window_title=title)
+            # Get Process Executable Name
+            pid = ctypes.c_ulong()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+
+            app_name = "Windows"
+            h_process = kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+            if h_process:
+                image_buf = ctypes.create_unicode_buffer(512)
+                size = ctypes.c_ulong(512)
+                if kernel32.QueryFullProcessImageNameW(h_process, 0, image_buf, ctypes.byref(size)):
+                    app_name = os.path.basename(image_buf.value)
+                    if app_name.lower().endswith(".exe"):
+                        app_name = app_name[:-4]
+                kernel32.CloseHandle(h_process)
+
+            return WindowInfo(app_name=app_name, window_title=title)
         except Exception as exc:
             logger.warning("Failed to detect Windows active window: %s", exc)
             return WindowInfo(app_name="Windows", window_title="")
 
     @classmethod
     def _get_linux_window(cls) -> WindowInfo:
-        """Reads the active window on Linux using xdotool if available."""
+        """Reads the active window on Linux using xdotool."""
         try:
             res = subprocess.run(
                 ["xdotool", "getwindowfocus", "getwindowname"],
@@ -140,8 +160,24 @@ return appName & "|||" & winTitle
                 text=True,
                 timeout=1.5,
             )
-            if res.returncode == 0:
-                return WindowInfo(app_name="Linux", window_title=res.stdout.strip())
+            title = res.stdout.strip() if res.returncode == 0 else ""
+
+            # Try to get process name via PID
+            pid_res = subprocess.run(
+                ["xdotool", "getwindowfocus", "getwindowpid"],
+                capture_output=True,
+                text=True,
+                timeout=1.5,
+            )
+            app_name = "Linux"
+            if pid_res.returncode == 0 and pid_res.stdout.strip().isdigit():
+                pid = pid_res.stdout.strip()
+                try:
+                    with open(f"/proc/{pid}/comm", "r", encoding="utf-8") as f:
+                        app_name = f.read().strip()
+                except Exception:
+                    pass
+
+            return WindowInfo(app_name=app_name, window_title=title)
         except Exception:
-            pass
-        return WindowInfo(app_name="Linux", window_title="")
+            return WindowInfo(app_name="Linux", window_title="")

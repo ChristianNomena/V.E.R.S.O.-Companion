@@ -53,7 +53,7 @@ def create_app(page: ft.Page) -> None:
     page.vertical_alignment = ft.MainAxisAlignment.CENTER
     page.horizontal_alignment = ft.CrossAxisAlignment.CENTER
 
-    worker_manager = WorkerManager()
+    worker_manager = WorkerManager(deliverables_dir="deliverables")
 
     def on_context_detected(context_type: str, payload: str) -> None:
         worker_manager.execute_intention(
