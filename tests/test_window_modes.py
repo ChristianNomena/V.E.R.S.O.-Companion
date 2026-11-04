@@ -23,6 +23,8 @@ from verso.workers.workers import WorkerManager
 
 ENTER_TOOLTIP = "Switch to Widget Mode (always on top)"
 EXIT_TOOLTIP = "Back to full window"
+PIN_TOOLTIP = "Pin Window on Top (Foreground)"
+PINNED_TOOLTIP = "Pinned on Top (Foreground) — click to unpin"
 
 WIDGET_SIZE = (330, 76)
 WINDOW_SIZE = (460, 700)
@@ -235,6 +237,47 @@ class WindowModePatchTest(unittest.TestCase):
         self.assertEqual(self.page.window.width, WINDOW_SIZE[0])
         self.assertEqual(self.page.window.height, WINDOW_SIZE[1])
 
+    def _click_pin(self):
+        """Clicks the pin button whichever tooltip state it is in."""
+        clickables = _walk_clickables(self.page)
+        for tooltip in (PIN_TOOLTIP, PINNED_TOOLTIP):
+            handlers = clickables.get(tooltip, [])
+            if handlers:
+                handlers[0]()
+                return _window_size_ops(
+                    self.conn.send_message.call_args_list, self.page.window._i
+                )
+        self.fail("no pin button found (neither pinned nor unpinned tooltip)")
+
+    def test_pin_toggle_sets_always_on_top(self):
+        self.assertFalse(self.page.window.always_on_top)
+        ops = self._click_pin()
+        self.assertIn(("always_on_top", True), ops)
+        self.assertTrue(self.page.window.always_on_top)
+        ops = self._click_pin()
+        self.assertIn(("always_on_top", False), ops)
+        self.assertFalse(self.page.window.always_on_top)
+
+    def test_pin_preference_survives_widget_cycle(self):
+        # Pin in window mode, cycle through the (always pinned) widget mode:
+        # the window-mode preference must be restored on exit.
+        self._click_pin()
+        self.assertTrue(self.page.window.always_on_top)
+        self._click(ENTER_TOOLTIP)
+        self.assertTrue(self.page.window.always_on_top)
+        self.conn.send_message.reset_mock()
+        self._click(EXIT_TOOLTIP)
+        self.assertTrue(self.page.window.always_on_top)
+
+    def test_unpinned_preference_survives_widget_cycle(self):
+        # Pin then unpin: exit must restore the unpinned state.
+        self._click_pin()
+        self._click_pin()
+        self.assertFalse(self.page.window.always_on_top)
+        self._click(ENTER_TOOLTIP)
+        self._click(EXIT_TOOLTIP)
+        self.assertFalse(self.page.window.always_on_top)
+
     def test_widget_mode_blocks_user_resize_attempts(self):
         # Enter widget mode
         self._click(ENTER_TOOLTIP)
@@ -377,7 +420,7 @@ class MiniQuickRepliesTest(unittest.TestCase):
         self._worker_manager().on_quick_replies(_make_quick_payload(QUICK_OPTIONS))
         # Grab the quick-card close button while the full view is mounted.
         root = self.page.controls[0]
-        home_view = root.content.controls[0].controls[1].content.controls[2].content
+        home_view = root.content.controls[0].controls[1].content.controls[3].content
         quick_card = home_view.controls[6]
         close_btn = quick_card.content.controls[0].controls[1]
         self._click_tooltip(ENTER_TOOLTIP)

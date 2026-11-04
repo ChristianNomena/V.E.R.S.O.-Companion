@@ -96,7 +96,8 @@ class Sentinel:
         was_running = self._is_running
         self._is_running = False
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=1.0)
+            if threading.current_thread() != self._thread:
+                self._thread.join(timeout=1.0)
         logger.info("V.E.R.S.O. Sentinel stopped.")
         if was_running and self.on_state_change:
             self.on_state_change(False)

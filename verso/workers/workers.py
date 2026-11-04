@@ -32,6 +32,7 @@ class WorkerManager:
         on_status_change: Optional[Callable[[str], None]] = None,
         on_task_completed: Optional[Callable[[Optional[TaskRecord]], None]] = None,
         on_quick_replies: Optional[Callable[[Dict[str, Any]], None]] = None,
+        on_speech_state: Optional[Callable[[bool, bool], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
         voice_enabled: bool = True,
     ) -> None:
@@ -39,12 +40,24 @@ class WorkerManager:
         self.on_status_change = on_status_change
         self.on_task_completed = on_task_completed
         self.on_quick_replies = on_quick_replies
+        self.on_speech_state = on_speech_state
         self.on_error = on_error
         self.voice_enabled = voice_enabled
         self.muse_client = MuseClient()
         self._is_busy: bool = False
         self._busy_lock = threading.Lock()
+        self._cancel_event = threading.Event()
         os.makedirs(self.deliverables_dir, exist_ok=True)
+
+    def cancel_current(self) -> None:
+        """Cancels the in-flight vocal interaction: speech and recording stop
+        immediately and the worker aborts at its next checkpoint."""
+        self._cancel_event.set()
+        TTSService.stop()
+        STTService.stop()
+
+    def _cancelled(self) -> bool:
+        return self._cancel_event.is_set()
 
     @property
     def is_busy(self) -> bool:
@@ -98,6 +111,7 @@ class WorkerManager:
                 )
                 return False
             self._is_busy = True
+        self._cancel_event.clear()
 
         worker_thread = threading.Thread(
             target=self._run_task,
@@ -120,6 +134,8 @@ class WorkerManager:
                     self.on_status_change(f"Generating quick replies for {sender}...")
 
                 quick_data = self.muse_client.generate_quick_replies(context_details)
+                if self._cancelled():
+                    return
                 quick_payload = {
                     "sender": sender,
                     "message": clean_msg,
@@ -162,6 +178,8 @@ class WorkerManager:
             prompt_done.wait(timeout=20.0)
             TTSService.stop()
             time.sleep(0.1)
+            if self._cancelled():
+                return
 
             # 3. Crisp audible chime signaling microphone opening
             SoundService.play_chime()
@@ -170,6 +188,8 @@ class WorkerManager:
             # 4. Immediate visual status change: listening to user now
             if self.on_status_change:
                 self.on_status_change("Listening to you... (Speak now) 🎙️")
+            if self.on_speech_state:
+                self.on_speech_state(True, False)
 
             listen_done = threading.Event()
             captured_speech = [""]
@@ -178,12 +198,22 @@ class WorkerManager:
                 captured_speech[0] = text
                 listen_done.set()
 
+            def on_speech_detected(is_speaking: bool) -> None:
+                if self.on_speech_state:
+                    self.on_speech_state(True, is_speaking)
+
             # 5. Capture user speech with generous duration (5.0s)
             STTService.listen(
                 duration=5.0,
+                on_speech_detected=on_speech_detected,
                 on_transcribed=on_transcribed,
             )
             listen_done.wait(timeout=8.0)
+
+            if self.on_speech_state:
+                self.on_speech_state(False, False)
+            if self._cancelled():
+                return
 
             # 6. Audible confirmation pop signaling recording completion
             SoundService.play_done()
@@ -198,6 +228,9 @@ class WorkerManager:
                 suggested_reply=f"Hi {sender}, thank you for reaching out! I am taking care of this and will follow up shortly.",
                 user_speech=user_speech,
             )
+
+            if self._cancelled():
+                return
 
             # 8. AI confirms out loud in one short sentence
             confirm_done = threading.Event()

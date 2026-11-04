@@ -1,6 +1,7 @@
 """
 V.E.R.S.O. - Database Models
-Defines the local data model for tracking Slack intentions and background executions.
+Defines the local data model for tracking Slack intentions, background executions,
+and the Benevolent Partner session memory (Pillar 2).
 """
 
 from datetime import datetime, timezone
@@ -49,4 +50,57 @@ class TaskRecord(SQLModel, table=True):
         default="COMPLETED",
         nullable=False,
         description="Completion status, e.g. COMPLETED",
+    )
+
+
+class ContextSnapshot(SQLModel, table=True):
+    """One consented observation snapshot of user activity (Pillar 2, session-only)."""
+
+    __tablename__ = "context_snapshot"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    session_id: str = Field(nullable=False, index=True)
+    app_name: str = Field(default="", nullable=False)
+    window_title: str = Field(default="", nullable=False)
+    clipboard_text: Optional[str] = Field(
+        default=None,
+        description="Clipboard content at capture time, stored only when it changed",
+    )
+    screenshot_path: Optional[str] = Field(
+        default=None,
+        description="Local path of the session screenshot (purged with the session)",
+    )
+
+
+class CompanionInteraction(SQLModel, table=True):
+    """Spontaneous or on-demand exchanges with the companion (Pillar 2, session-only)."""
+
+    __tablename__ = "companion_interaction"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+        nullable=False,
+    )
+    session_id: str = Field(nullable=False, index=True)
+    interaction_type: str = Field(
+        nullable=False,
+        description="'SPONTANEOUS' or 'ASKED'",
+    )
+    message: str = Field(
+        nullable=False,
+        description="Advice or opinion formulated by V.E.R.S.O.",
+    )
+    question: Optional[str] = Field(
+        default=None,
+        description="User question for ASKED interactions",
+    )
+    status: str = Field(
+        default="UNREAD",
+        nullable=False,
+        description="Notification/read status, e.g. UNREAD or READ",
     )

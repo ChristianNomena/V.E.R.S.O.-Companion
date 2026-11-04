@@ -3,3 +3,4 @@ sqlmodel
 pyperclip
 requests
 python-dotenv
+piper-tts

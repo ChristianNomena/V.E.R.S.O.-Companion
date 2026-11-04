@@ -1,19 +1,40 @@
 """
 V.E.R.S.O. - Speech-to-Text (STT) Service
-Records user vocal input via microphone and transcribes it locally
-(zero Muse API cost; uses SpeechRecognition when available).
+Records user vocal input via microphone, detects live voice activity in real time,
+and transcribes speech locally (zero Muse API cost; uses SpeechRecognition when available).
 """
 
 import logging
+import math
 import os
 import platform
+import struct
 import subprocess
 import tempfile
 import threading
 import time
+import wave
 from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def _calculate_rms(chunk: bytes) -> int:
+    """Calculates root-mean-square audio energy of 16-bit PCM chunk."""
+    try:
+        import audioop
+        return audioop.rms(chunk, 2)
+    except Exception:
+        try:
+            import audioop_lts as audioop
+            return audioop.rms(chunk, 2)
+        except Exception:
+            count = len(chunk) // 2
+            if count == 0:
+                return 0
+            shorts = struct.unpack(f"{count}h", chunk)
+            sum_sq = sum(s * s for s in shorts)
+            return int(math.sqrt(sum_sq / count))
 
 
 class STTService:
@@ -21,21 +42,35 @@ class STTService:
 
     _is_recording: bool = False
     _record_process: Optional[subprocess.Popen] = None
+    SPEECH_RMS_THRESHOLD: int = 350
+
+    @classmethod
+    def stop(cls) -> None:
+        """Immediately stops any active microphone recording."""
+        proc = cls._record_process
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        cls._is_recording = False
 
     @classmethod
     def listen(
         cls,
         duration: float = 4.0,
         on_started: Optional[Callable[[], None]] = None,
+        on_speech_detected: Optional[Callable[[bool], None]] = None,
         on_transcribed: Optional[Callable[[str], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
     ) -> None:
         """
         Listens to user vocal input asynchronously and transcribes the speech.
+        Calls on_speech_detected(is_speaking) dynamically in real-time.
         """
         thread = threading.Thread(
             target=cls._listen_sync,
-            args=(duration, on_started, on_transcribed, on_error),
+            args=(duration, on_started, on_speech_detected, on_transcribed, on_error),
             daemon=True,
             name="VersoSTTThread",
         )
@@ -46,6 +81,7 @@ class STTService:
         cls,
         duration: float,
         on_started: Optional[Callable[[], None]],
+        on_speech_detected: Optional[Callable[[bool], None]],
         on_transcribed: Optional[Callable[[str], None]],
         on_error: Optional[Callable[[str], None]],
     ) -> None:
@@ -58,11 +94,12 @@ class STTService:
         temp_audio = os.path.join(tempfile.gettempdir(), f"verso_user_speech_{int(time.time())}.wav")
         current_os = platform.system()
 
-        # 1. Record audio using available system tool (ffmpeg on mac/linux)
         recorded = False
+        last_speech_state: Optional[bool] = None
+
+        # 1. Real-time microphone capture with audio level / voice activity detection (VAD)
         try:
             if current_os == "Darwin":
-                # AVFoundation microphone capture with ffmpeg
                 cmd = [
                     "ffmpeg",
                     "-f", "avfoundation",
@@ -70,12 +107,10 @@ class STTService:
                     "-t", str(duration),
                     "-ar", "16000",
                     "-ac", "1",
-                    "-y", temp_audio,
+                    "-f", "s16le",
+                    "-y", "pipe:1",
                 ]
-                proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=duration + 2.0)
-                recorded = (proc.returncode == 0 and os.path.exists(temp_audio) and os.path.getsize(temp_audio) > 1000)
             elif current_os == "Windows":
-                # DirectShow capture if available
                 cmd = [
                     "ffmpeg",
                     "-f", "dshow",
@@ -83,12 +118,62 @@ class STTService:
                     "-t", str(duration),
                     "-ar", "16000",
                     "-ac", "1",
-                    "-y", temp_audio,
+                    "-f", "s16le",
+                    "-y", "pipe:1",
                 ]
-                proc = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=duration + 2.0)
-                recorded = (proc.returncode == 0 and os.path.exists(temp_audio))
+            else:
+                cmd = [
+                    "ffmpeg",
+                    "-f", "pulse",
+                    "-i", "default",
+                    "-t", str(duration),
+                    "-ar", "16000",
+                    "-ac", "1",
+                    "-f", "s16le",
+                    "-y", "pipe:1",
+                ]
+
+            with wave.open(temp_audio, "wb") as wav_file:
+                wav_file.setnchannels(1)
+                wav_file.setsampwidth(2)
+                wav_file.setframerate(16000)
+
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+                cls._record_process = proc
+                cls._is_recording = True
+
+                chunk_size = 3200  # 0.1s at 16kHz mono (16-bit = 2 bytes/sample)
+                while True:
+                    chunk = proc.stdout.read(chunk_size)
+                    if not chunk:
+                        break
+                    wav_file.writeframes(chunk)
+
+                    # Compute real-time volume energy
+                    energy = _calculate_rms(chunk)
+                    is_speaking = energy >= cls.SPEECH_RMS_THRESHOLD
+
+                    if is_speaking != last_speech_state:
+                        last_speech_state = is_speaking
+                        if on_speech_detected:
+                            try:
+                                on_speech_detected(is_speaking)
+                            except Exception as exc:
+                                logger.debug("Error in on_speech_detected: %s", exc)
+
+                proc.wait(timeout=duration + 2.0)
+                recorded = os.path.exists(temp_audio) and os.path.getsize(temp_audio) > 1000
+
         except Exception as exc:
-            logger.warning("Microphone recording failed: %s", exc)
+            logger.warning("Microphone streaming failed: %s", exc)
+        finally:
+            cls._is_recording = False
+            cls._record_process = None
+            if on_speech_detected:
+                try:
+                    on_speech_detected(False)
+                except Exception:
+                    pass
 
         # 2. Transcribe user speech using SpeechRecognition
         transcription = ""

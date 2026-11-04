@@ -29,6 +29,19 @@ def _mock_responses_body(text, usage=None):
     return resp
 
 
+def _mock_stream_response(deltas):
+    resp = MagicMock()
+    resp.headers = {"Content-Type": "text/event-stream"}
+    resp.raise_for_status.return_value = None
+    lines = [
+        "data: " + json.dumps({"type": "response.output_text.delta", "delta": d})
+        for d in deltas
+    ]
+    lines.append("data: [DONE]")
+    resp.iter_lines.return_value = lines
+    return resp
+
+
 def _make_client(session):
     return MuseClient(
         api_key="k",
@@ -153,6 +166,34 @@ class MuseClientTest(unittest.TestCase):
         self.assertEqual(qr["sender"], "Leo")
         self.assertEqual(len(qr["options"]), 3)
         self.assertEqual(qr["options"][0], "Option 1")
+
+    def test_ask_companion_streams_deltas(self):
+        session = MagicMock()
+        session.post.return_value = _mock_stream_response(["Hello ", "streamed ", "world"])
+        client = _make_client(session)
+        collected = []
+        answer = client.ask_companion(
+            "[10:00] Code - app.py", "What do you think?", on_delta=collected.append
+        )
+        self.assertEqual(answer, "Hello streamed world")
+        self.assertEqual("".join(collected), "Hello streamed world")
+        payload = session.post.call_args.kwargs["json"]
+        self.assertIs(payload["stream"], True)
+
+    def test_ask_companion_stream_failure_falls_back_to_plain_request(self):
+        session = MagicMock()
+        session.post.side_effect = [
+            Exception("stream boom"),
+            _mock_responses_body("Plain answer"),
+        ]
+        client = _make_client(session)
+        collected = []
+        answer = client.ask_companion(
+            "[10:00] Code - app.py", "What do you think?", on_delta=collected.append
+        )
+        self.assertEqual(answer, "Plain answer")
+        self.assertEqual(session.post.call_count, 2)
+        self.assertIs(session.post.call_args.kwargs["json"]["stream"], False)
 
     def test_api_failure_falls_back_without_raising(self):
         session = MagicMock()

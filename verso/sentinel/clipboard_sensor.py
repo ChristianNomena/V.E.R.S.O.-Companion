@@ -25,6 +25,14 @@ class ClipboardSensor:
             with cls._lock:
                 cls._ignored_hashes.add(hash(text.strip()))
 
+    @classmethod
+    def is_ignored(cls, text: str) -> bool:
+        """Peeks whether a text was internally generated (no consume, thread-safe)."""
+        if not text or not text.strip():
+            return False
+        with cls._lock:
+            return hash(text.strip()) in cls._ignored_hashes
+
     def __init__(self) -> None:
         self._last_content: str = ""
         try:

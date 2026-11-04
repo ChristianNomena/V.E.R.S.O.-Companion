@@ -18,9 +18,11 @@ Optimization strategy:
 - One shared ``_request`` transport helper (no duplicated request code).
 """
 
+import base64
 import hashlib
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -40,6 +42,7 @@ from verso.config import (
     MUSE_MAX_TOKENS_FINALIZE,
     MUSE_MAX_TOKENS_SUGGESTION,
     MUSE_MODEL,
+    MUSE_REASONING_EFFORT,
     MUSE_TEMPERATURE,
     MUSE_TIMEOUT,
 )
@@ -70,6 +73,14 @@ def _truncate(text: str, max_chars: int = MUSE_MAX_INPUT_CHARS) -> str:
     if len(cleaned) <= max_chars:
         return cleaned
     return cleaned[:max_chars].rstrip() + "…"
+
+
+def _truncate_tail(text: str, max_chars: int) -> str:
+    """Keeps the most recent tail of a chronological text (drops the oldest)."""
+    cleaned = (text or "").strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return "…" + cleaned[-max_chars:].lstrip()
 
 
 def _extract_sender(incoming_context: str) -> Tuple[str, str]:
@@ -152,7 +163,36 @@ def _extract_output_text(data: Dict[str, Any]) -> str:
         legacy = ""
     if isinstance(legacy, str) and legacy.strip():
         return legacy.strip()
+
+    if data.get("status") == "incomplete":
+        inc = data.get("incomplete_details") or {}
+        reason = inc.get("reason", "max_output_tokens")
+        raise ValueError(f"Muse response incomplete ({reason})")
+
     raise ValueError("Muse response contains no readable output text")
+
+
+# Screenshots attached to companion answers (Responses API input_image blocks).
+MAX_COMPANION_IMAGE_BYTES = 8 * 1024 * 1024
+
+
+def _load_image_block(path: str) -> Optional[Dict[str, Any]]:
+    """Loads a screenshot file as an input_image content block, or None if unusable."""
+    try:
+        if not path or not os.path.isfile(path):
+            return None
+        if os.path.getsize(path) > MAX_COMPANION_IMAGE_BYTES:
+            logger.debug("Skipping oversized screenshot: %s", path)
+            return None
+        with open(path, "rb") as handle:
+            raw = handle.read()
+        if not raw:
+            return None
+        encoded = base64.b64encode(raw).decode("ascii")
+        return {"type": "input_image", "image_url": f"data:image/png;base64,{encoded}"}
+    except Exception as exc:
+        logger.debug("Skipping unreadable screenshot %s: %s", path, exc)
+        return None
 
 
 class _TtlCache:
@@ -195,12 +235,14 @@ class MuseClient:
         temperature: float = MUSE_TEMPERATURE,
         max_retries: int = MUSE_MAX_RETRIES,
         session: Optional[requests.Session] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> None:
         self.api_key = api_key or META_MUSE_API_KEY
         self.endpoint = endpoint or META_MUSE_ENDPOINT
         self.model_name = model_name or MUSE_MODEL
         self.timeout = MUSE_TIMEOUT if timeout is None else timeout
         self.temperature = temperature
+        self.reasoning_effort = MUSE_REASONING_EFFORT if reasoning_effort is None else reasoning_effort
         self._owns_session = session is None
         self._session = session or self._build_session(max_retries)
         self._suggestion_cache = _TtlCache(MUSE_CACHE_MAX_ENTRIES, MUSE_CACHE_TTL_SECONDS)
@@ -249,19 +291,20 @@ class MuseClient:
 
     # -- Transport -----------------------------------------------------
 
-    def _request(
+    def _build_payload(
         self,
         system_prompt: str,
         user_text: str,
         max_output_tokens: int,
-    ) -> str:
-        """Sends one Responses API request and returns the assistant text.
-
-        Payload follows the official Meta example: ``model`` + ``input``
-        content blocks + ``"stream": False`` (+ standard ``temperature`` and
-        ``max_output_tokens`` bounds). Strict-JSON behavior is enforced via
-        the prompt text and the tolerant ``_parse_json_object`` parser.
-        """
+        images: Optional[List[str]] = None,
+        stream: bool = False,
+    ) -> Dict[str, Any]:
+        user_content: List[Dict[str, Any]] = [{"type": "input_text", "text": user_text}]
+        if images:
+            for image_path in images:
+                image_block = _load_image_block(image_path)
+                if image_block is not None:
+                    user_content.append(image_block)
         payload: Dict[str, Any] = {
             "model": self.model_name,
             "input": [
@@ -271,20 +314,52 @@ class MuseClient:
                 },
                 {
                     "role": "user",
-                    "content": [{"type": "input_text", "text": user_text}],
+                    "content": user_content,
                 },
             ],
             "temperature": self.temperature,
             "max_output_tokens": max_output_tokens,
-            "stream": False,
+            "stream": stream,
         }
-        headers = {
+        if self.reasoning_effort:
+            payload["reasoning"] = {"effort": self.reasoning_effort}
+        return payload
+
+    def _headers(self) -> Dict[str, str]:
+        return {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+
+    def _request(
+        self,
+        system_prompt: str,
+        user_text: str,
+        max_output_tokens: int,
+        images: Optional[List[str]] = None,
+    ) -> str:
+        """Sends one Responses API request and returns the assistant text.
+
+        Payload follows the official Meta example: ``model`` + ``input``
+        content blocks + ``"stream": False`` (+ standard ``temperature`` and
+        ``max_output_tokens`` bounds). Strict-JSON behavior is enforced via
+        the prompt text and the tolerant ``_parse_json_object`` parser.
+        Optional screenshot paths ride along as ``input_image`` blocks.
+        """
+        payload = self._build_payload(system_prompt, user_text, max_output_tokens, images)
+        headers = self._headers()
         resp = self._session.post(
             self.responses_endpoint, json=payload, headers=headers, timeout=self.timeout
         )
+        if (
+            resp.status_code == 400
+            and "reasoning" in payload
+            and "reasoning" in resp.text.lower()
+        ):
+            payload.pop("reasoning", None)
+            resp = self._session.post(
+                self.responses_endpoint, json=payload, headers=headers, timeout=self.timeout
+            )
         resp.raise_for_status()
         data = resp.json()
         usage = data.get("usage") or {}
@@ -297,6 +372,75 @@ class MuseClient:
                 usage.get("total_tokens"),
             )
         return _extract_output_text(data)
+
+    def _request_stream(
+        self,
+        system_prompt: str,
+        user_text: str,
+        max_output_tokens: int,
+        images: Optional[List[str]] = None,
+        on_delta: Optional[Any] = None,
+    ) -> str:
+        """Streaming variant of ``_request``: forwards text deltas as they arrive.
+
+        Parses Server-Sent Events (``response.output_text.delta``). If the
+        gateway answers with a plain JSON body instead of a stream, that body
+        is parsed like a normal response. Raises on transport/HTTP errors or
+        when the stream produced no text, so callers can fall back.
+        """
+        payload = self._build_payload(
+            system_prompt, user_text, max_output_tokens, images, stream=True
+        )
+        resp = self._session.post(
+            self.responses_endpoint,
+            json=payload,
+            headers=self._headers(),
+            timeout=self.timeout,
+            stream=True,
+        )
+        resp.raise_for_status()
+        content_type = ""
+        try:
+            content_type = str((resp.headers or {}).get("Content-Type", ""))
+        except Exception:
+            content_type = ""
+        if "text/event-stream" not in content_type:
+            return _extract_output_text(resp.json())
+
+        parts: List[str] = []
+        for raw_line in resp.iter_lines(decode_unicode=True):
+            line = (raw_line or "").strip() if isinstance(raw_line, str) else ""
+            if not line.startswith("data:"):
+                continue
+            data_str = line[len("data:"):].strip()
+            if not data_str or data_str == "[DONE]":
+                continue
+            try:
+                event = json.loads(data_str)
+            except (ValueError, TypeError):
+                continue
+            delta = ""
+            if isinstance(event, dict):
+                if event.get("type") == "response.output_text.delta":
+                    delta = str(event.get("delta") or "")
+                elif isinstance(event.get("delta"), str):
+                    delta = event["delta"]
+                elif event.get("choices"):
+                    try:
+                        delta = str(event["choices"][0]["delta"].get("content") or "")
+                    except Exception:
+                        delta = ""
+            if delta:
+                parts.append(delta)
+                if on_delta is not None:
+                    try:
+                        on_delta(delta)
+                    except Exception:
+                        pass
+        text = "".join(parts).strip()
+        if not text:
+            raise ValueError("Streaming response produced no text")
+        return text
 
     # -- Public API ----------------------------------------------------
 
@@ -474,3 +618,165 @@ class MuseClient:
         except Exception as exc:
             logger.warning("Muse (%s) quick replies request failed (%s), using fallback template.", self.model_name, exc)
             return fallback()
+
+    # -- Pillar 2: Benevolent Partner -----------------------------------
+
+    COMPANION_SYSTEM_PROMPT = (
+        "You are V.E.R.S.O., a benevolent copilot: clear and straightforward. "
+        "You have observed the user's recent activity (applications, windows, "
+        "screenshots, clipboard). Reply in English, concisely, grounding every "
+        "piece of advice in the observed facts. "
+        "No superfluous greetings, no repetitive pleasantries. "
+        "Never ask the user to paste code or share screenshots: work strictly "
+        "with the observed timeline and attached screenshots. If the context is "
+        "thin, say plainly what you can see and suggest keeping observation on longer."
+    )
+    SPONTANEOUS_SYSTEM_PROMPT = (
+        "You are V.E.R.S.O., a benevolent copilot, silent by default. "
+        "Analyze the activity timeline. If and only if you detect a "
+        "high-value fact (prolonged stall, repeated attempts without progress, "
+        "notable context switch, important milestone reached), reply with a "
+        'strict JSON object {"speak": true, "message": "..."}: 1 to 2 '
+        "constructive, concrete sentences in English. Otherwise reply exactly "
+        '{"speak": false, "message": ""}. JSON object only.'
+    )
+
+    def evaluate_spontaneous(self, timeline: str) -> Dict[str, Any]:
+        """
+        Strictly arbitrates whether a spontaneous intervention is warranted.
+
+        Returns {"speak": bool, "message": str}. Silence by default: any
+        failure, empty timeline, or missing API key stays silent.
+        """
+        fallback: Dict[str, Any] = {"speak": False, "message": ""}
+        if not self.is_configured:
+            return dict(fallback)
+        if not (timeline or "").strip():
+            return dict(fallback)
+        try:
+            content = self._request(
+                self.SPONTANEOUS_SYSTEM_PROMPT,
+                f"Recent timeline:\n{_truncate_tail(timeline, 3000)}",
+                MUSE_MAX_TOKENS_SUGGESTION,
+            )
+            parsed = _parse_json_object(content)
+            if parsed.get("speak") is True and str(parsed.get("message", "")).strip():
+                return {"speak": True, "message": str(parsed["message"]).strip()}
+            return dict(fallback)
+        except Exception as exc:
+            logger.warning(
+                "Muse (%s) spontaneous check failed (%s); staying silent.",
+                self.model_name,
+                exc,
+            )
+            return dict(fallback)
+
+    def ask_companion(
+        self,
+        timeline: str,
+        question: str,
+        image_paths: Optional[List[str]] = None,
+        on_delta: Optional[Any] = None,
+    ) -> str:
+        """
+        Answers an on-demand question from the observed timeline and attached
+        screenshots (English, copilot tone, grounded in observed facts).
+        When ``on_delta`` is given, the answer is streamed and each text chunk
+        is forwarded as it arrives (falling back to a plain request if the
+        stream fails). Retries text-only if the vision request fails;
+        elegant offline fallback.
+        """
+        question = (question or "").strip() or "What do you think?"
+        clipped_timeline = _truncate_tail(timeline or "", 3000)
+
+        seen: List[str] = []
+        for line in (timeline or "").splitlines():
+            head = line.split("]", 1)[-1].split("—", 1)[0].strip() if "]" in line else ""
+            if head and head not in seen and head != "?":
+                seen.append(head)
+            if len(seen) >= 3:
+                break
+        apps = ", ".join(seen)
+
+        def fallback() -> str:
+            if apps:
+                return (
+                    "From what I observed this session "
+                    f"({apps}), my take: keep going, and feel free to ask me again "
+                    "once I am back online for a deeper analysis. (Offline mode)"
+                )
+            return (
+                "I do not have enough observed context yet to give a useful opinion, "
+                "and I am currently offline. Keep observation running for a few "
+                "minutes. (Offline mode)"
+            )
+
+        if not self.is_configured:
+            return fallback()
+
+        prompt = (
+            f"Observed context:\n{clipped_timeline}\n\n"
+            f"User question: '{_truncate(question)}'\n\n"
+            "Reply in English, concisely and grounded in the observed facts and screenshots."
+        )
+        images = [path for path in (image_paths or []) if path]
+        max_tokens = max(MUSE_MAX_TOKENS_FINALIZE, 1500)
+
+        def generate(with_images: Optional[List[str]]) -> str:
+            if on_delta is not None:
+                try:
+                    return self._request_stream(
+                        self.COMPANION_SYSTEM_PROMPT,
+                        prompt,
+                        max_tokens,
+                        images=with_images,
+                        on_delta=on_delta,
+                    )
+                except Exception as stream_exc:
+                    logger.warning(
+                        "Muse (%s) streaming failed (%s), retrying plain request.",
+                        self.model_name,
+                        stream_exc,
+                    )
+                    return self._request(
+                        self.COMPANION_SYSTEM_PROMPT,
+                        prompt,
+                        max_tokens,
+                        images=with_images,
+                    )
+            return self._request(
+                self.COMPANION_SYSTEM_PROMPT,
+                prompt,
+                max_tokens,
+                images=with_images,
+            )
+
+        try:
+            content = generate(images or None)
+        except Exception as exc:
+            if not images:
+                logger.warning(
+                    "Muse (%s) companion answer failed (%s), using offline fallback.",
+                    self.model_name,
+                    exc,
+                )
+                return fallback()
+            logger.warning(
+                "Muse (%s) vision answer failed (%s), retrying text-only.",
+                self.model_name,
+                exc,
+            )
+            try:
+                content = generate(None)
+            except Exception as retry_exc:
+                logger.warning(
+                    "Muse (%s) text-only retry failed (%s), using offline fallback.",
+                    self.model_name,
+                    retry_exc,
+                )
+                return fallback()
+        final = content.strip()
+        if not final:
+            logger.warning("Muse returned an empty companion answer, using offline fallback.")
+            return fallback()
+        return final
