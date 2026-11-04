@@ -16,9 +16,76 @@ import tempfile
 import threading
 import time
 import wave
-from typing import Callable, Optional
+from typing import Callable, List, Optional
 
 logger = logging.getLogger(__name__)
+
+_cached_windows_audio_device: Optional[str] = None
+
+
+def parse_dshow_audio_devices(ffmpeg_output: str) -> List[str]:
+    """Extracts DirectShow audio device names from `ffmpeg -list_devices` output."""
+    devices: List[str] = []
+    in_audio_section = False
+    for line in (ffmpeg_output or "").splitlines():
+        lowered = line.lower()
+        if "directshow audio devices" in lowered:
+            in_audio_section = True
+            continue
+        if "directshow video devices" in lowered:
+            in_audio_section = False
+            continue
+        if not in_audio_section:
+            continue
+        if "alternative name" in lowered:
+            continue
+        start = line.find('"')
+        end = line.find('"', start + 1) if start >= 0 else -1
+        if start >= 0 and end > start:
+            name = line[start + 1:end].strip()
+            if name and name not in devices:
+                devices.append(name)
+    return devices
+
+
+def get_windows_audio_device() -> str:
+    """Returns the first real DirectShow microphone name (cached), or 'default'."""
+    global _cached_windows_audio_device
+    if _cached_windows_audio_device:
+        return _cached_windows_audio_device
+    device = "default"
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-list_devices", "true", "-f", "dshow", "-i", "dummy"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+        )
+        devices = parse_dshow_audio_devices(result.stderr or result.stdout or "")
+        if devices:
+            device = devices[0]
+    except Exception as exc:
+        logger.debug("Could not enumerate Windows audio devices: %s", exc)
+    _cached_windows_audio_device = device
+    return device
+
+
+def build_microphone_command(duration: Optional[float] = None) -> List[str]:
+    """Builds the ffmpeg microphone capture prefix for the current OS.
+
+    On Windows the first enumerated DirectShow audio device is used, because
+    the literal name 'default' usually does not exist there.
+    """
+    current_os = platform.system()
+    if current_os == "Darwin":
+        cmd = ["ffmpeg", "-f", "avfoundation", "-i", ":default"]
+    elif current_os == "Windows":
+        cmd = ["ffmpeg", "-f", "dshow", "-i", f"audio={get_windows_audio_device()}"]
+    else:
+        cmd = ["ffmpeg", "-f", "pulse", "-i", "default"]
+    if duration is not None:
+        cmd += ["-t", str(duration)]
+    return cmd
 
 
 def _calculate_rms(chunk: bytes) -> int:
@@ -136,46 +203,18 @@ class STTService:
                 logger.error("Error in on_started callback: %s", exc)
 
         temp_audio = os.path.join(tempfile.gettempdir(), f"verso_user_speech_{int(time.time())}.wav")
-        current_os = platform.system()
 
         recorded = False
         last_speech_state: Optional[bool] = None
 
         # 1. Real-time microphone capture with audio level / voice activity detection (VAD)
         try:
-            if current_os == "Darwin":
-                cmd = [
-                    "ffmpeg",
-                    "-f", "avfoundation",
-                    "-i", ":default",
-                    "-t", str(duration),
-                    "-ar", "16000",
-                    "-ac", "1",
-                    "-f", "s16le",
-                    "-y", "pipe:1",
-                ]
-            elif current_os == "Windows":
-                cmd = [
-                    "ffmpeg",
-                    "-f", "dshow",
-                    "-i", "audio=default",
-                    "-t", str(duration),
-                    "-ar", "16000",
-                    "-ac", "1",
-                    "-f", "s16le",
-                    "-y", "pipe:1",
-                ]
-            else:
-                cmd = [
-                    "ffmpeg",
-                    "-f", "pulse",
-                    "-i", "default",
-                    "-t", str(duration),
-                    "-ar", "16000",
-                    "-ac", "1",
-                    "-f", "s16le",
-                    "-y", "pipe:1",
-                ]
+            cmd = build_microphone_command(duration) + [
+                "-ar", "16000",
+                "-ac", "1",
+                "-f", "s16le",
+                "-y", "pipe:1",
+            ]
 
             with wave.open(temp_audio, "wb") as wav_file:
                 wav_file.setnchannels(1)

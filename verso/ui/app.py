@@ -121,24 +121,6 @@ THEMES: Dict[str, Dict[str, Any]] = {
 }
 
 
-def open_deliverable(filepath: str = "deliverables/SLACK_DRAFT.md") -> None:
-    """Opens the generated deliverable in the system default editor."""
-    if not os.path.exists(filepath):
-        logger.warning("Deliverable file not found: %s", filepath)
-        return
-
-    current_os = platform.system()
-    try:
-        if current_os == "Darwin":
-            subprocess.run(["open", filepath], check=False)
-        elif current_os == "Windows":
-            os.startfile(filepath)  # type: ignore[attr-defined]
-        else:
-            subprocess.run(["xdg-open", filepath], check=False)
-    except Exception as exc:
-        logger.error("Failed to open deliverable file: %s", exc)
-
-
 def open_system_security_settings() -> None:
     """Opens system privacy & security settings directly for the user."""
     current_os = platform.system()
@@ -1736,9 +1718,21 @@ def create_app(page: ft.Page) -> None:
 
     def on_pane_drag(e: ft.DragUpdateEvent) -> None:
         nonlocal pane_width
-        current_w = page.width or (page.window.width if hasattr(page.window, "width") else 460) or 460
+        # Flet 1.x DragUpdateEvent carries Offset deltas (local/global) or a
+        # primary delta; older builds used delta_x. Read them defensively.
+        delta_x = 0.0
+        for delta in (getattr(e, "local_delta", None), getattr(e, "global_delta", None)):
+            if delta is not None:
+                delta_x = float(getattr(delta, "x", 0) or 0)
+                break
+        else:
+            if getattr(e, "primary_delta", None) is not None:
+                delta_x = float(e.primary_delta)
+            else:
+                delta_x = float(getattr(e, "delta_x", 0) or 0)
+        current_w = _current_window_width()
         max_allowed = max(240, int(current_w * 0.65)) if is_wide_enough() else max(240, int(current_w - 40))
-        new_width = max(220, min(max_allowed, pane_width + int(e.delta_x)))
+        new_width = max(220, min(max_allowed, pane_width + int(delta_x)))
         pane_width = int(new_width)
         if is_wide_enough():
             docked_pane.width = pane_width
@@ -2967,7 +2961,6 @@ def create_app(page: ft.Page) -> None:
         pass
 
     worker_manager = WorkerManager(
-        deliverables_dir="deliverables",
         on_status_change=on_status_change,
         on_task_completed=on_task_completed,
         on_quick_replies=on_quick_replies_received,
@@ -3056,13 +3049,31 @@ def create_app(page: ft.Page) -> None:
         refresh_listen_top()
         page.update()
 
+    def on_ambient_speech(is_speaking: bool) -> None:
+        if not sentinel or not sentinel.is_running:
+            return
+        if is_speaking:
+            set_voice_speaking_state(True, True)
+        else:
+            set_voice_speaking_state(False, False)
+
+    def on_ambient_wake_word(prompt: str) -> None:
+        if not sentinel or not sentinel.is_running:
+            return
+        SoundService.play_chime()
+        if not is_mini_mode and not is_chat_open:
+            open_companion_chat()
+        run_companion_question(prompt)
+
     sentinel = Sentinel(
         poll_interval=1.5,
         cooldown_seconds=15.0,
         on_context_detected=on_context_detected,
         on_error=show_error,
         on_state_change=on_sentinel_state_change,
-        is_busy_fn=lambda: worker_manager.is_busy,
+        is_busy_fn=lambda: (worker_manager.is_busy if worker_manager else False),
+        on_voice_speech=on_ambient_speech,
+        on_wake_word=on_ambient_wake_word,
     )
 
     def toggle_listening(e):

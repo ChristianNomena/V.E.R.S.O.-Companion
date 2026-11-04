@@ -196,6 +196,37 @@ class TestVocalAndQuickModes(unittest.TestCase):
         self.assertFalse(toolbar.visible)
         self.assertEqual(toolbar.height, 0)
 
+    def test_history_pane_drag_resize_uses_local_delta(self):
+        # Wide layout: history docked on the left, resizable via its handle.
+        self.page.width = 1000
+        history_btn = self.top_bar.content.controls[0].controls[0]
+        history_btn.on_click(None)
+
+        docked_pane = self.main_layout.controls[0]
+        self.assertTrue(docked_pane.visible)
+        self.assertEqual(docked_pane.width, 300)
+        resizer = docked_pane.content.controls[1]
+
+        event = ft.DragUpdateEvent(
+            name="pan_update",
+            control=resizer,
+            local_position=ft.Offset(0, 0),
+            global_position=ft.Offset(0, 0),
+            local_delta=ft.Offset(40, 0),
+        )
+        resizer.on_pan_update(event)
+        self.assertEqual(docked_pane.width, 340)
+
+        event_left = ft.DragUpdateEvent(
+            name="pan_update",
+            control=resizer,
+            local_position=ft.Offset(0, 0),
+            global_position=ft.Offset(0, 0),
+            local_delta=ft.Offset(-30, 0),
+        )
+        resizer.on_pan_update(event_left)
+        self.assertEqual(docked_pane.width, 310)
+
     def test_companion_chat_panel_open_and_bubbles_rendering(self):
         # Message button is at right_group.controls[5], next to Ask [4]
         from verso.companion.observer import CompanionObserver
@@ -264,6 +295,9 @@ class TestVocalAndQuickModes(unittest.TestCase):
             while send_btn.disabled and time_module.time() < deadline:
                 time_module.sleep(0.05)
             self.assertFalse(send_btn.disabled)
+
+        wait_until_idle()
+        self.mock_speak.reset_mock()
 
         # Voice replies ON: the answer is spoken aloud
         with patch("verso.companion.observer.CompanionObserver.ask", return_value="Mocked spoken answer"):
@@ -639,6 +673,12 @@ class TestVocalAndQuickModes(unittest.TestCase):
             mock_stt.side_effect = fake_listen
             wm._run_task("Slack", "From Bob: Are you free?")
 
+        # No Markdown deliverable files are written anymore (DB + clipboard only)
+        import os
+
+        self.assertFalse(os.path.exists("deliverables/DELIVERABLE.md"))
+        self.assertFalse(os.path.exists("deliverables/SLACK_DRAFT.md"))
+
         self.assertIn((True, False), speech_states)
         self.assertIn((True, True), speech_states)
         self.assertIn((False, False), speech_states)
@@ -655,6 +695,100 @@ class TestVocalAndQuickModes(unittest.TestCase):
         loud_pcm = struct.pack("<1600h", *([12000, -12000] * 800))
         loud_rms = _calculate_rms(loud_pcm)
         self.assertGreater(loud_rms, STTService.SPEECH_RMS_THRESHOLD)
+
+    def test_ambient_wake_word_prompt_extraction(self):
+        from verso.sentinel.voice_sensor import extract_wake_prompt, has_closing_keyword
+
+        # Direct instruction after wake-word
+        self.assertEqual(
+            extract_wake_prompt("Verso, what do you think of this code?"),
+            "what do you think of this code?",
+        )
+        # Direct instruction in French
+        self.assertEqual(
+            extract_wake_prompt("Verso, que penses-tu de ce projet ?"),
+            "que penses-tu de ce projet ?",
+        )
+        # Wake-word at end of sentence
+        self.assertEqual(
+            extract_wake_prompt("What do you think of this project, Verso?"),
+            "What do you think of this project",
+        )
+        # Just wake-word alone
+        self.assertEqual(
+            extract_wake_prompt("Verso"),
+            "What do you think?",
+        )
+        self.assertEqual(
+            extract_wake_prompt("Verso?"),
+            "What do you think?",
+        )
+        # Phonetic variant
+        self.assertEqual(
+            extract_wake_prompt("Verseau, analyse mon écran"),
+            "analyse mon écran",
+        )
+        # Closing keywords trimming ("Thanks", "Thank you")
+        self.assertEqual(
+            extract_wake_prompt("Verso, check the latest commit, thanks"),
+            "check the latest commit",
+        )
+        self.assertEqual(
+            extract_wake_prompt("Verso, check the latest commit. Thank you."),
+            "check the latest commit",
+        )
+        self.assertEqual(
+            extract_wake_prompt("Verso, analyze this file, thank you!"),
+            "analyze this file",
+        )
+        self.assertEqual(
+            extract_wake_prompt("Verso, what do you think? Thank you"),
+            "what do you think?",
+        )
+        # Non-wake utterances return None (zero false triggers)
+        self.assertIsNone(extract_wake_prompt("Hello everyone in the meeting"))
+        self.assertIsNone(extract_wake_prompt("Can you check the logs?"))
+        self.assertIsNone(extract_wake_prompt(""))
+
+        # Closing keyword detector
+        self.assertTrue(has_closing_keyword("Verso, thank you!"))
+        self.assertTrue(has_closing_keyword("thanks for your help"))
+        self.assertFalse(has_closing_keyword("Verso, tell me a joke"))
+
+    def test_ambient_voice_sensor_lifecycle_and_callback(self):
+        from verso.sentinel.voice_sensor import VoiceSensor
+
+        detected_speech = []
+        wake_prompts = []
+
+        def on_speech(is_spk: bool):
+            detected_speech.append(is_spk)
+
+        def on_wake(prompt: str):
+            wake_prompts.append(prompt)
+
+        sensor = VoiceSensor(
+            on_speech_detected=on_speech,
+            on_wake_word=on_wake,
+            is_busy_fn=lambda: False,
+        )
+
+        with patch("subprocess.Popen") as mock_popen:
+            mock_proc = MagicMock()
+            mock_proc.poll.return_value = 0
+            mock_proc.stdout.read.return_value = b""
+            mock_popen.return_value = mock_proc
+
+            sensor.start()
+            self.assertTrue(sensor.is_running)
+            sensor.stop()
+            self.assertFalse(sensor.is_running)
+
+        # Test utterance processing with wake-word
+        with patch("verso.services.stt_service.STTService._transcribe", return_value="Verso, summarize this doc"):
+            sensor._process_utterance(b"dummy_audio_bytes")
+
+        self.assertEqual(wake_prompts, ["summarize this doc"])
 
 
 if __name__ == "__main__":

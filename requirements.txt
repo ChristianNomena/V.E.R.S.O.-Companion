@@ -4,3 +4,6 @@ pyperclip
 requests
 python-dotenv
 piper-tts
+pillow
+SpeechRecognition
+plyer

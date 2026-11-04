@@ -2,6 +2,7 @@ from verso.sentinel.clipboard_sensor import ClipboardSensor
 from verso.sentinel.notification_sensor import NotificationSensor
 from verso.sentinel.screenshot_sensor import ScreenshotSensor
 from verso.sentinel.sentinel import Sentinel
+from verso.sentinel.voice_sensor import VoiceSensor, extract_wake_prompt
 from verso.sentinel.window_sensor import WindowInfo, WindowSensor
 
 __all__ = [
@@ -11,4 +12,6 @@ __all__ = [
     "ClipboardSensor",
     "NotificationSensor",
     "ScreenshotSensor",
+    "VoiceSensor",
+    "extract_wake_prompt",
 ]

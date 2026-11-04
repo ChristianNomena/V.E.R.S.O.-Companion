@@ -11,6 +11,7 @@ from typing import Callable, Optional, Tuple
 
 from verso.sentinel.clipboard_sensor import ClipboardSensor
 from verso.sentinel.notification_sensor import NotificationSensor
+from verso.sentinel.voice_sensor import VoiceSensor
 from verso.sentinel.window_sensor import WindowSensor
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,8 @@ class Sentinel:
         on_error: Optional[Callable[[str], None]] = None,
         on_state_change: Optional[Callable[[bool], None]] = None,
         is_busy_fn: Optional[Callable[[], bool]] = None,
+        on_voice_speech: Optional[Callable[[bool], None]] = None,
+        on_wake_word: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.poll_interval = poll_interval
         self.cooldown_seconds = cooldown_seconds
@@ -37,9 +40,16 @@ class Sentinel:
         self.on_error = on_error
         self.on_state_change = on_state_change
         self.is_busy_fn = is_busy_fn
+        self.on_voice_speech = on_voice_speech
+        self.on_wake_word = on_wake_word
 
         self.notification_sensor = NotificationSensor(on_error=self._handle_sensor_error)
         self.clipboard_sensor = ClipboardSensor()
+        self.voice_sensor = VoiceSensor(
+            on_speech_detected=self.on_voice_speech,
+            on_wake_word=self.on_wake_word,
+            is_busy_fn=self.is_busy_fn,
+        )
         self._is_running = False
         self._thread: Optional[threading.Thread] = None
 
@@ -82,6 +92,7 @@ class Sentinel:
 
         self._is_running = True
         self.notification_sensor.initialize_baseline()
+        self.voice_sensor.start()
         self._thread = threading.Thread(
             target=self._loop, daemon=True, name="VersoSentinelThread"
         )
@@ -95,6 +106,11 @@ class Sentinel:
         """Stops the background sentinel."""
         was_running = self._is_running
         self._is_running = False
+        self.voice_sensor.stop()
+        try:
+            self.notification_sensor.close()
+        except Exception:
+            pass
         if self._thread and self._thread.is_alive():
             if threading.current_thread() != self._thread:
                 self._thread.join(timeout=1.0)
