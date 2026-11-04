@@ -8,6 +8,7 @@ from verso.database.database import (
     get_session,
     init_db,
     insert_task,
+    update_task_title,
 )
 from verso.database.models import TaskRecord
 
@@ -17,5 +18,6 @@ __all__ = [
     "get_session",
     "insert_task",
     "get_recent_tasks",
+    "update_task_title",
     "TaskRecord",
 ]

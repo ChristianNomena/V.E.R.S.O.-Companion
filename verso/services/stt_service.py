@@ -100,7 +100,7 @@ class STTService:
 
         # If offline or no speech detected via API, provide a clean fallback confirmation
         if not transcription:
-            transcription = "Oui, valide la réponse suggérée."
+            transcription = "Yes, approve the suggested response."
 
         # Cleanup audio file
         try:

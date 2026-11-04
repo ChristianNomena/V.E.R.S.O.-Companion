@@ -9,12 +9,15 @@ import logging
 import os
 import platform
 import subprocess
+import threading
+import time
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import flet as ft
+import pyperclip
 
-from verso.database import TaskRecord, get_recent_tasks
+from verso.database import TaskRecord, get_recent_tasks, update_task_title
 from verso.sentinel import Sentinel
 from verso.services.notification_service import NotificationService
 from verso.workers import WorkerManager
@@ -176,6 +179,34 @@ def create_app(page: ft.Page) -> None:
         tooltip="Toggle Task History",
     )
 
+    home_icon = ft.Icon(icon=ft.Icons.HOME_ROUNDED, size=20, color=colors["text_secondary"])
+    home_btn = ft.Container(
+        content=home_icon,
+        width=38,
+        height=38,
+        border_radius=19,
+        bgcolor=colors["top_btn_bg"],
+        border=ft.Border.all(1, colors["top_btn_border"]),
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        visible=False,
+        tooltip="Return to Home View (Central Button)",
+    )
+
+    compact_toggle_icon = ft.Icon(icon=ft.Icons.PLAY_ARROW_ROUNDED, size=20, color=colors["idle_icon"])
+    compact_toggle_btn = ft.Container(
+        content=compact_toggle_icon,
+        width=38,
+        height=38,
+        border_radius=19,
+        bgcolor=colors["top_btn_bg"],
+        border=ft.Border.all(1, colors["top_btn_border"]),
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        visible=False,
+        tooltip="Start / Pause Sentinel Listening",
+    )
+
     theme_icon = ft.Icon(icon=ft.Icons.LIGHT_MODE_ROUNDED, size=20, color=colors["text_secondary"])
     theme_btn = ft.Container(
         content=theme_icon,
@@ -193,9 +224,9 @@ def create_app(page: ft.Page) -> None:
         padding=ft.Padding(left=20, top=16, right=20, bottom=8),
         content=ft.Row(
             [
-                history_btn,
+                ft.Row([history_btn, home_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Container(expand=True),
-                theme_btn,
+                ft.Row([compact_toggle_btn, theme_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ],
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
@@ -324,6 +355,335 @@ def create_app(page: ft.Page) -> None:
         spacing=8,
     )
 
+    # 3.1 Central Response Card (surfaces the generated response with 1-click copy)
+    response_badge = ft.Container(
+        content=ft.Text(
+            "RESPONSE READY",
+            size=9,
+            weight=ft.FontWeight.W_700,
+            color=colors["badge_done_text"],
+        ),
+        bgcolor=colors["badge_done_bg"],
+        border_radius=4,
+        padding=ft.Padding(left=6, top=2, right=6, bottom=2),
+    )
+
+    response_sender_text = ft.Text(
+        "",
+        size=11,
+        weight=ft.FontWeight.W_600,
+        color=colors["text_secondary"],
+    )
+
+    def dismiss_response(e=None) -> None:
+        response_card.visible = False
+        page.update()
+
+    response_close_btn = ft.IconButton(
+        icon=ft.Icons.CLOSE_ROUNDED,
+        icon_size=16,
+        icon_color=colors["text_muted"],
+        tooltip="Dismiss",
+        on_click=dismiss_response,
+    )
+
+    response_body_text = ft.Text(
+        "",
+        size=12,
+        color=colors["text_primary"],
+        selectable=True,
+    )
+
+    copy_btn_icon = ft.Icon(icon=ft.Icons.CONTENT_COPY_ROUNDED, size=15, color="#FFFFFF")
+    copy_btn_text = ft.Text("Copy Response", size=11, weight=ft.FontWeight.W_600, color="#FFFFFF")
+
+    def copy_main_response(e=None) -> None:
+        if not response_body_text.value:
+            return
+        try:
+            pyperclip.copy(response_body_text.value)
+            page.set_clipboard(response_body_text.value)
+        except Exception:
+            pass
+        copy_btn_icon.icon = ft.Icons.CHECK_ROUNDED
+        copy_btn_text.value = "Copied!"
+        status_text.value = "Response copied to clipboard (Cmd+V)!"
+        status_dot.bgcolor = "#10B981"
+        page.update()
+
+        def reset_btn():
+            time.sleep(2.0)
+            copy_btn_icon.icon = ft.Icons.CONTENT_COPY_ROUNDED
+            copy_btn_text.value = "Copy Response"
+            page.update()
+
+        threading.Thread(target=reset_btn, daemon=True).start()
+
+    copy_response_btn = ft.Container(
+        content=ft.Row(
+            [copy_btn_icon, copy_btn_text],
+            spacing=6,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        bgcolor="#0284C7",
+        border_radius=8,
+        padding=ft.Padding(left=14, top=8, right=14, bottom=8),
+        ink=True,
+        on_click=copy_main_response,
+        tooltip="Copy directly to clipboard (Cmd+V)",
+    )
+
+    response_card_inner = ft.Container(
+        content=response_body_text,
+        bgcolor=colors["panel_bg"],
+        border_radius=6,
+        padding=10,
+    )
+
+    response_card = ft.Container(
+        width=380,
+        margin=ft.Margin(left=20, top=16, right=20, bottom=12),
+        padding=14,
+        border_radius=10,
+        bgcolor=colors["card_bg"],
+        border=ft.Border.all(1, colors["card_border"]),
+        visible=False,
+        animate=ft.Animation(250, ft.AnimationCurve.EASE_OUT),
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Row(
+                            [response_badge, response_sender_text],
+                            spacing=8,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        response_close_btn,
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                response_card_inner,
+                ft.Row(
+                    [
+                        ft.Container(expand=True),
+                        copy_response_btn,
+                    ],
+                    alignment=ft.MainAxisAlignment.END,
+                ),
+            ],
+            spacing=10,
+        ),
+    )
+
+    # 3.2 Home View (Companion Center with large tactile button)
+    home_view = ft.Column(
+        [
+            ft.Container(expand=True),
+            title,
+            ft.Container(height=28),
+            toggle_container,
+            ft.Container(height=20),
+            status_row,
+            response_card,
+            ft.Container(expand=True),
+        ],
+        horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        spacing=0,
+    )
+
+    # 3.3 Details View (Task Details with editable title, full exchange, and copy button)
+    current_selected_task_id: Optional[int] = None
+
+    details_title_field = ft.TextField(
+        value="",
+        text_size=17,
+        text_style=ft.TextStyle(weight=ft.FontWeight.W_700, color=colors["text_primary"]),
+        color=colors["text_primary"],
+        border=ft.InputBorder.UNDERLINE,
+        border_color=colors["idle_border"],
+        focused_border_color=colors["idle_icon"],
+        content_padding=ft.Padding(left=4, top=4, right=4, bottom=6),
+        expand=True,
+        hint_text="Task title...",
+        hint_style=ft.TextStyle(color=colors["text_muted"], size=14),
+    )
+
+    details_save_icon = ft.IconButton(
+        icon=ft.Icons.CHECK_ROUNDED,
+        icon_size=20,
+        icon_color=colors["idle_icon"],
+        tooltip="Save Title",
+    )
+
+    def save_task_title(e=None):
+        nonlocal current_selected_task_id
+        if current_selected_task_id is not None:
+            new_title = details_title_field.value.strip() or "Slack Response"
+            update_task_title(current_selected_task_id, new_title)
+            render_history_items()
+            status_text.value = f"Title updated: {new_title}"
+            status_dot.bgcolor = "#10B981"
+            page.update()
+
+    details_title_field.on_submit = save_task_title
+    details_save_icon.on_click = save_task_title
+
+    details_meta_row = ft.Row(spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+    details_msg_text = ft.Text("", size=12, color=colors["text_secondary"], selectable=True)
+    details_msg_container = ft.Container(
+        bgcolor=colors["panel_bg"],
+        border_radius=8,
+        padding=12,
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Icon(icon=ft.Icons.FORUM_OUTLINED, size=15, color=colors["text_muted"]),
+                        ft.Text(
+                            "RECEIVED MESSAGE (SLACK)",
+                            size=10,
+                            weight=ft.FontWeight.W_700,
+                            style=ft.TextStyle(letter_spacing=1.0, color=colors["text_muted"]),
+                        ),
+                    ],
+                    spacing=6,
+                ),
+                details_msg_text,
+            ],
+            spacing=6,
+        ),
+    )
+
+    details_dialogue_column = ft.Column(spacing=6)
+    details_dialogue_container = ft.Container(
+        bgcolor=colors["panel_bg"],
+        border=ft.Border.all(1, colors["card_border"]),
+        border_radius=8,
+        padding=12,
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Icon(icon=ft.Icons.RECORD_VOICE_OVER_ROUNDED, size=15, color=colors["idle_icon"]),
+                        ft.Text(
+                            "AMBIENT VOCAL EXCHANGE",
+                            size=10,
+                            weight=ft.FontWeight.W_700,
+                            style=ft.TextStyle(letter_spacing=1.0, color=colors["idle_icon"]),
+                        ),
+                    ],
+                    spacing=6,
+                ),
+                details_dialogue_column,
+            ],
+            spacing=6,
+        ),
+    )
+
+    details_response_text = ft.Text("", size=12, color=colors["text_primary"], selectable=True)
+    details_copy_icon = ft.Icon(icon=ft.Icons.CONTENT_COPY_ROUNDED, size=15, color="#FFFFFF")
+    details_copy_text = ft.Text("Copy for Slack", size=11, weight=ft.FontWeight.W_600, color="#FFFFFF")
+
+    def copy_details_response(e=None):
+        if not details_response_text.value:
+            return
+        try:
+            pyperclip.copy(details_response_text.value)
+            page.set_clipboard(details_response_text.value)
+        except Exception:
+            pass
+        details_copy_icon.icon = ft.Icons.CHECK_ROUNDED
+        details_copy_text.value = "Copied!"
+        status_text.value = "Response copied to clipboard (Cmd+V)!"
+        status_dot.bgcolor = "#10B981"
+        page.update()
+
+        def reset_btn():
+            time.sleep(2.0)
+            details_copy_icon.icon = ft.Icons.CONTENT_COPY_ROUNDED
+            details_copy_text.value = "Copy for Slack"
+            page.update()
+
+        threading.Thread(target=reset_btn, daemon=True).start()
+
+    details_copy_btn = ft.Container(
+        content=ft.Row(
+            [details_copy_icon, details_copy_text],
+            spacing=6,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        bgcolor="#0284C7",
+        border_radius=8,
+        padding=ft.Padding(left=14, top=8, right=14, bottom=8),
+        ink=True,
+        on_click=copy_details_response,
+        tooltip="Copy response to clipboard (Cmd+V)",
+    )
+
+    details_response_container = ft.Container(
+        bgcolor=colors["card_bg"],
+        border=ft.Border.all(1, colors["idle_border"]),
+        border_radius=8,
+        padding=12,
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Row(
+                            [
+                                ft.Icon(icon=ft.Icons.AUTO_AWESOME_ROUNDED, size=15, color=colors["badge_slack_text"]),
+                                ft.Text(
+                                    "READY RESPONSE FOR SLACK",
+                                    size=10,
+                                    weight=ft.FontWeight.W_700,
+                                    style=ft.TextStyle(letter_spacing=1.0, color=colors["badge_slack_text"]),
+                                ),
+                            ],
+                            spacing=6,
+                        ),
+                        details_copy_btn,
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                ft.Container(height=4),
+                details_response_text,
+            ],
+            spacing=6,
+        ),
+    )
+
+    details_view = ft.Container(
+        expand=True,
+        padding=ft.Padding(left=24, top=12, right=24, bottom=24),
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        details_title_field,
+                        details_save_icon,
+                    ],
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                details_meta_row,
+                ft.Divider(height=16, color=colors["card_border"]),
+                details_msg_container,
+                details_dialogue_container,
+                details_response_container,
+            ],
+            spacing=14,
+            scroll=ft.ScrollMode.AUTO,
+        ),
+    )
+
+    content_area = ft.Container(
+        content=home_view,
+        expand=True,
+        alignment=ft.Alignment(0, 0),
+    )
+
     main_view = ft.Container(
         expand=True,
         alignment=ft.Alignment(0, 0),
@@ -331,102 +691,148 @@ def create_app(page: ft.Page) -> None:
             [
                 top_bar,
                 alert_banner,
-                ft.Container(expand=True),
-                title,
-                ft.Container(height=32),
-                toggle_container,
-                ft.Container(height=24),
-                status_row,
-                ft.Container(expand=True),
+                content_area,
             ],
             horizontal_alignment=ft.CrossAxisAlignment.CENTER,
             spacing=0,
         ),
     )
 
+    # Helper navigation: Show Details View vs Return to Home View
+    def show_task_details(task: TaskRecord) -> None:
+        nonlocal current_selected_task_id
+        current_selected_task_id = task.id
+        c = THEMES[current_theme]
+
+        details_title_field.value = task.action_title
+
+        time_str = (
+            task.timestamp.strftime("%Y-%m-%d %H:%M:%S")
+            if isinstance(task.timestamp, datetime)
+            else str(task.timestamp)
+        )
+        details_meta_row.controls = [
+            ft.Container(
+                content=ft.Text(task.trigger_source, size=10, weight=ft.FontWeight.W_600, color=c["badge_slack_text"]),
+                bgcolor=c["badge_slack_bg"],
+                border_radius=4,
+                padding=ft.Padding(left=6, top=2, right=6, bottom=2),
+            ),
+            ft.Container(
+                content=ft.Text(task.status, size=10, weight=ft.FontWeight.W_600, color=c["badge_done_text"]),
+                bgcolor=c["badge_done_bg"],
+                border_radius=4,
+                padding=ft.Padding(left=6, top=2, right=6, bottom=2),
+            ),
+            ft.Text(time_str, size=11, color=c["text_muted"]),
+        ]
+
+        if task.incoming_message:
+            details_msg_text.value = task.incoming_message.replace("From ", "").strip()
+            details_msg_container.visible = True
+        else:
+            details_msg_container.visible = False
+
+        details_dialogue_column.controls.clear()
+        if task.ai_suggestion or task.user_response:
+            if task.ai_suggestion:
+                details_dialogue_column.controls.append(
+                    ft.Row(
+                        [
+                            ft.Text("🤖", size=13),
+                            ft.Text(task.ai_suggestion, size=11, color=c["text_primary"], weight=ft.FontWeight.W_500, expand=True),
+                        ],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    )
+                )
+            if task.user_response:
+                details_dialogue_column.controls.append(
+                    ft.Row(
+                        [
+                            ft.Text("🗣️", size=13),
+                            ft.Text(f"You: '{task.user_response}'", size=11, color=c["text_secondary"], style=ft.TextStyle(italic=True), expand=True),
+                        ],
+                        spacing=8,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
+                    )
+                )
+            details_dialogue_container.visible = True
+        else:
+            details_dialogue_container.visible = False
+
+        if task.final_response:
+            details_response_text.value = task.final_response
+            details_response_container.visible = True
+        else:
+            details_response_container.visible = False
+
+        content_area.content = details_view
+        home_btn.visible = True
+        compact_toggle_btn.visible = True
+        page.update()
+
+    def return_to_home(e=None) -> None:
+        content_area.content = home_view
+        home_btn.visible = False
+        compact_toggle_btn.visible = False
+        page.update()
+
+    home_btn.on_click = return_to_home
+
     # 4. History List Views (Independent for Docked Panel & Overlay Drawer)
     list_docked = ft.ListView(
-        spacing=10,
-        padding=ft.Padding(left=14, top=6, right=14, bottom=16),
+        spacing=8,
+        padding=ft.Padding(left=12, top=6, right=12, bottom=16),
         auto_scroll=False,
         expand=True,
     )
 
     list_drawer = ft.ListView(
-        spacing=10,
-        padding=ft.Padding(left=14, top=6, right=14, bottom=16),
+        spacing=8,
+        padding=ft.Padding(left=12, top=6, right=12, bottom=16),
         auto_scroll=False,
         expand=True,
     )
 
     def build_task_card(task: TaskRecord, c: Dict[str, Any]) -> ft.Container:
-        """Builds a formatted task history card."""
+        """Builds a clean, compact history list item displaying only title and timestamp."""
         time_str = (
-            task.timestamp.strftime("%H:%M:%S")
+            task.timestamp.strftime("%H:%M")
             if isinstance(task.timestamp, datetime)
-            else str(task.timestamp)
+            else str(task.timestamp)[:5]
         )
         return ft.Container(
             bgcolor=c["card_bg"],
             border=ft.Border.all(1, c["card_border"]),
             border_radius=8,
-            padding=12,
-            content=ft.Column(
+            padding=ft.Padding(left=12, top=10, right=10, bottom=10),
+            ink=True,
+            on_click=lambda e, t=task: show_task_details(t),
+            tooltip=f"Details for {task.action_title}",
+            content=ft.Row(
                 [
                     ft.Row(
                         [
+                            ft.Icon(icon=ft.Icons.RECORD_VOICE_OVER_ROUNDED, size=15, color=c["idle_icon"]),
                             ft.Text(
                                 task.action_title,
-                                size=13,
+                                size=12,
                                 weight=ft.FontWeight.W_600,
                                 color=c["text_primary"],
-                                expand=True,
-                            ),
-                            ft.Text(
-                                time_str,
-                                size=11,
-                                color=c["text_muted"],
+                                max_lines=1,
+                                overflow=ft.TextOverflow.ELLIPSIS,
                             ),
                         ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                    ),
-                    ft.Row(
-                        [
-                            ft.Container(
-                                content=ft.Text(
-                                    task.trigger_source,
-                                    size=10,
-                                    weight=ft.FontWeight.W_600,
-                                    color=c["badge_slack_text"],
-                                ),
-                                bgcolor=c["badge_slack_bg"],
-                                border_radius=4,
-                                padding=ft.Padding(left=6, top=2, right=6, bottom=2),
-                            ),
-                            ft.Container(
-                                content=ft.Text(
-                                    task.status,
-                                    size=10,
-                                    weight=ft.FontWeight.W_600,
-                                    color=c["badge_done_text"],
-                                ),
-                                bgcolor=c["badge_done_bg"],
-                                border_radius=4,
-                                padding=ft.Padding(left=6, top=2, right=6, bottom=2),
-                            ),
-                            ft.IconButton(
-                                icon=ft.Icons.DESCRIPTION_OUTLINED,
-                                icon_size=16,
-                                icon_color=c["text_secondary"],
-                                tooltip="Open SLACK_DRAFT.md",
-                                on_click=lambda e: open_deliverable("deliverables/SLACK_DRAFT.md"),
-                            ),
-                        ],
-                        alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                        spacing=8,
                         vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        expand=True,
                     ),
+                    ft.Text(time_str, size=10, color=c["text_muted"]),
+                    ft.Icon(icon=ft.Icons.CHEVRON_RIGHT_ROUNDED, size=16, color=c["text_muted"]),
                 ],
-                spacing=6,
+                alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
             ),
         )
 
@@ -706,6 +1112,38 @@ def create_app(page: ft.Page) -> None:
         overlay_drawer.border = ft.Border(right=ft.BorderSide(1, c["panel_border"]))
         backdrop.bgcolor = c["backdrop_color"]
 
+        # Central Response Card
+        response_card.bgcolor = c["card_bg"]
+        response_card.border = ft.Border.all(1, c["card_border"])
+        response_badge.bgcolor = c["badge_done_bg"]
+        response_badge.content.color = c["badge_done_text"]
+        response_sender_text.color = c["text_secondary"]
+        response_body_text.color = c["text_primary"]
+        response_card_inner.bgcolor = c["panel_bg"]
+        response_close_btn.icon_color = c["text_muted"]
+
+        # Top Bar Home & Compact Toggle Buttons
+        home_icon.color = c["text_secondary"]
+        home_btn.bgcolor = c["top_btn_bg"]
+        home_btn.border = ft.Border.all(1, c["top_btn_border"])
+
+        compact_toggle_btn.bgcolor = c["top_btn_bg"]
+        compact_toggle_btn.border = ft.Border.all(1, c["top_btn_border"])
+        compact_toggle_icon.color = c["active_icon"] if sentinel.is_running else c["idle_icon"]
+
+        # Details View Styling
+        details_title_field.color = c["text_primary"]
+        details_title_field.border_color = c["idle_border"]
+        details_title_field.focused_border_color = c["idle_icon"]
+        details_save_icon.icon_color = c["idle_icon"]
+        details_msg_container.bgcolor = c["panel_bg"]
+        details_msg_text.color = c["text_secondary"]
+        details_dialogue_container.bgcolor = c["panel_bg"]
+        details_dialogue_container.border = ft.Border.all(1, c["card_border"])
+        details_response_container.bgcolor = c["card_bg"]
+        details_response_container.border = ft.Border.all(1, c["idle_border"])
+        details_response_text.color = c["text_primary"]
+
         render_history_items()
         page.update()
 
@@ -736,17 +1174,50 @@ def create_app(page: ft.Page) -> None:
     def on_status_change(msg: str) -> None:
         c = THEMES[current_theme]
         status_text.value = msg
-        if "processing" in msg.lower() or "at work" in msg.lower():
-            status_dot.bgcolor = "#F59E0B"
+        msg_lower = msg.lower()
+
+        if "speak" in msg_lower:
+            status_dot.bgcolor = "#38BDF8"  # Cyan for vocal speaking
+            btn_icon.icon = ft.Icons.RECORD_VOICE_OVER_ROUNDED
+            btn_icon.color = "#38BDF8"
+        elif "listen" in msg_lower:
+            status_dot.bgcolor = "#EC4899"  # Vibrant pink for listening to user
+            btn_icon.icon = ft.Icons.MIC_ROUNDED
+            btn_icon.color = "#EC4899"
+        elif "analyz" in msg_lower or "finaliz" in msg_lower or "process" in msg_lower:
+            status_dot.bgcolor = "#F59E0B"  # Amber for thinking
+            btn_icon.icon = ft.Icons.AUTO_AWESOME_ROUNDED
+            btn_icon.color = "#F59E0B"
         elif sentinel.is_running:
             status_dot.bgcolor = c["idle_icon"]
+            btn_icon.icon = ft.Icons.STOP_ROUNDED
+            btn_icon.color = c["active_icon"]
         else:
             status_dot.bgcolor = c["text_muted"]
+            btn_icon.icon = ft.Icons.PLAY_ARROW_ROUNDED
+            btn_icon.color = c["idle_icon"]
         page.update()
 
-    def on_task_completed() -> None:
+    def on_task_completed(task: Optional[TaskRecord] = None) -> None:
+        c = THEMES[current_theme]
         status_dot.bgcolor = "#10B981"
-        status_text.value = "Draft ready · Listening attentively"
+        status_text.value = "Response ready and copied (Cmd+V)"
+        if sentinel.is_running:
+            btn_icon.icon = ft.Icons.STOP_ROUNDED
+            btn_icon.color = c["active_icon"]
+
+        # Surface response directly in the central interface
+        target_task = task
+        if not target_task:
+            recent = get_recent_tasks(limit=1)
+            if recent:
+                target_task = recent[0]
+
+        if target_task and target_task.final_response:
+            response_sender_text.value = target_task.action_title
+            response_body_text.value = target_task.final_response
+            response_card.visible = True
+
         render_history_items()
         page.update()
 
@@ -772,6 +1243,11 @@ def create_app(page: ft.Page) -> None:
             toggle_container.gradient = c["idle_gradient"]
             toggle_container.border = ft.Border.all(1.5, c["idle_border"])
             toggle_container.shadow = c["idle_shadow"]
+
+            compact_toggle_icon.icon = ft.Icons.PLAY_ARROW_ROUNDED
+            compact_toggle_icon.color = c["idle_icon"]
+            compact_toggle_btn.tooltip = "Start listening"
+
             if not alert_banner.visible:
                 status_dot.bgcolor = c["text_muted"]
                 status_text.value = "Idle · Tap button to start listening"
@@ -782,6 +1258,11 @@ def create_app(page: ft.Page) -> None:
             toggle_container.gradient = c["active_gradient"]
             toggle_container.border = ft.Border.all(1.5, c["active_border"])
             toggle_container.shadow = c["active_shadow"]
+
+            compact_toggle_icon.icon = ft.Icons.STOP_ROUNDED
+            compact_toggle_icon.color = c["active_icon"]
+            compact_toggle_btn.tooltip = "Pause listening"
+
             status_dot.bgcolor = c["idle_icon"]
             status_text.value = "Listening attentively on the Verso"
         page.update()
@@ -815,6 +1296,8 @@ def create_app(page: ft.Page) -> None:
                 toggle_container.gradient = c["idle_gradient"]
                 toggle_container.border = ft.Border.all(1.5, c["idle_border"])
                 toggle_container.shadow = c["idle_shadow"]
+                compact_toggle_icon.icon = ft.Icons.PLAY_ARROW_ROUNDED
+                compact_toggle_icon.color = c["idle_icon"]
                 page.update()
                 return
 
@@ -827,6 +1310,7 @@ def create_app(page: ft.Page) -> None:
         page.update()
 
     toggle_container.on_click = toggle_listening
+    compact_toggle_btn.on_click = toggle_listening
 
     # Layout Assembly: Stack with Docked Base Row + Responsive Overlay Layer
     page.add(

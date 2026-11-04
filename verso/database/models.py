@@ -10,7 +10,7 @@ from sqlmodel import Field, SQLModel
 
 
 class TaskRecord(SQLModel, table=True):
-    """Represents a background task executed silently on the Verso."""
+    """Represents a background task or vocal interaction executed on the Verso."""
 
     __tablename__ = "task_record"
 
@@ -25,9 +25,25 @@ class TaskRecord(SQLModel, table=True):
         description="Source of the trigger, e.g. SLACK_INTENT",
     )
     action_title: str = Field(
-        ...,
+        default="Slack Response Handled",
         nullable=False,
         description="Concise descriptive title of the action performed",
+    )
+    incoming_message: Optional[str] = Field(
+        default=None,
+        description="Incoming communication content detected",
+    )
+    ai_suggestion: Optional[str] = Field(
+        default=None,
+        description="The spoken suggestion proposed by the assistant",
+    )
+    user_response: Optional[str] = Field(
+        default=None,
+        description="The vocal command or response spoken by the user",
+    )
+    final_response: Optional[str] = Field(
+        default=None,
+        description="The final ready-to-send drafted response",
     )
     status: str = Field(
         default="COMPLETED",

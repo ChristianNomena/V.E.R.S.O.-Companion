@@ -61,9 +61,8 @@ class TTSService:
 
         try:
             if current_os == "Darwin":
-                # Prefer Thomas (French) or default system voice
+                # Use default system voice (e.g. Samantha / Alex on macOS)
                 cmd = ["say", text]
-                # Check if Thomas is available for French natural voice
                 with cls._lock:
                     cls._current_process = subprocess.Popen(cmd)
                 cls._current_process.wait()

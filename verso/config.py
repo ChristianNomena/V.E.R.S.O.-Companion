@@ -20,5 +20,6 @@ else:
 DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///verso_companion.db")
 
 # External AI Service (Meta Muse API)
+DEFAULT_META_ENDPOINT = "https://api.meta.ai/v1"
 META_MUSE_API_KEY: str = os.getenv("META_MUSE_API_KEY", "")
-META_MUSE_ENDPOINT: str = os.getenv("META_MUSE_ENDPOINT", "")
+META_MUSE_ENDPOINT: str = os.getenv("META_MUSE_ENDPOINT", "").strip() or DEFAULT_META_ENDPOINT
