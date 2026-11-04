@@ -8,6 +8,7 @@ import os
 import threading
 from typing import Callable, Optional
 
+from verso.database import insert_task
 from verso.services.muse_client import MuseClient
 from verso.services.notification_service import NotificationService
 
@@ -62,6 +63,20 @@ class WorkerManager:
             )
             with open(filepath, "w", encoding="utf-8") as f:
                 f.write(content)
+
+            # 3. Persist executed task record to database
+            action_title = result.get(
+                "action_title",
+                "Drafted Slack Response" if trigger_source == "SLACK_INTENT" else "Backstage Task",
+            )
+            try:
+                insert_task(
+                    action_title=action_title,
+                    trigger_source=trigger_source,
+                    status="COMPLETED",
+                )
+            except Exception as db_exc:
+                logger.error("Failed to persist task record: %s", db_exc)
 
             notification_text = result.get(
                 "notification",

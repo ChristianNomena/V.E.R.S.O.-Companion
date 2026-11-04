@@ -39,15 +39,15 @@
 ## Phase 3 : Modèle de Données & Persistance Locale (SQLModel)
 
 - [x] Configurer le moteur SQLModel agnostique avec support multi-thread pour SQLite
-- [ ] Déclarer la table des tâches avec les champs :
+- [x] Déclarer la table des tâches avec les champs :
   - Identifiant unique
   - Horodatage
   - Source du déclencheur (fixée à `SLACK_INTENT`)
   - Titre de l'action réalisée
   - Statut de complétion
-- [ ] Écrire la fonction d'initialisation automatique du schéma au démarrage
-- [ ] Écrire la fonction d'insertion d'une nouvelle tâche exécutée
-- [ ] Écrire la fonction de récupération des dernières tâches enregistrées pour l'affichage
+- [x] Écrire la fonction d'initialisation automatique du schéma au démarrage
+- [x] Écrire la fonction d'insertion d'une nouvelle tâche exécutée
+- [x] Écrire la fonction de récupération des dernières tâches enregistrées pour l'affichage
 
 ---
 
@@ -76,7 +76,7 @@
 ## Phase 6 : Worker d'Arrière-Plan & Notifications Natives
 
 - [x] Créer la fonction de notification native macOS via AppleScript
-- [ ] Configurer l'exécution asynchrone du traitement :
+- [x] Configurer l'exécution asynchrone du traitement :
   - Signaler à l'interface graphique que V.E.R.S.O. traite l'intention
   - Interroger Meta Muse pour obtenir la proposition de réponse
   - Écrire le fichier de livrable Markdown (`SLACK_DRAFT.md`) dans le dossier `deliverables/`
@@ -89,7 +89,6 @@
 ## Phase 7 : Interface Utilisateur Flet (Vue Compagnon)
 
 - [x] Configurer la fenêtre Flet en mode sombre et format compact
-- [ ] Ajouter l'en-tête identifiant le projet et le sous-titre du Pilier 1
 - [x] Ajouter le bouton de bascule pour démarrer ou suspendre la sentinelle Slack
 - [ ] Ajouter l'indicateur d'état en direct (icône ou anneau animé + message textuel)
 - [ ] Ajouter la liste dynamique affichant l'historique des intentions Slack traitées
