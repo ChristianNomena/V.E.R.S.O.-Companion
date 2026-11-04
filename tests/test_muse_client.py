@@ -5,21 +5,37 @@ import unittest
 from unittest.mock import MagicMock
 
 from verso.services.muse_client import (
+    _extract_output_text,
     _is_vocal_approval,
     _parse_json_object,
     _truncate,
     MuseClient,
 )
 
+TEST_MODEL = "muse-wonder-1.0"
 
-def _mock_chat_response(content, usage=None):
-    resp = MagicMock()
-    payload = {"choices": [{"message": {"content": content}}]}
+
+def _mock_responses_body(text, usage=None):
+    body = {
+        "output": [
+            {"type": "message", "content": [{"type": "output_text", "text": text}]}
+        ]
+    }
     if usage is not None:
-        payload["usage"] = usage
-    resp.json.return_value = payload
+        body["usage"] = usage
+    resp = MagicMock()
+    resp.json.return_value = body
     resp.raise_for_status.return_value = None
     return resp
+
+
+def _make_client(session):
+    return MuseClient(
+        api_key="k",
+        endpoint="https://api.meta.ai/v1",
+        model_name=TEST_MODEL,
+        session=session,
+    )
 
 
 class ApprovalDetectionTest(unittest.TestCase):
@@ -45,38 +61,103 @@ class InputHandlingTest(unittest.TestCase):
         self.assertEqual(_parse_json_object('```json\n{"a": 1}\n```'), {"a": 1})
 
 
+class OutputExtractionTest(unittest.TestCase):
+    def test_responses_shape(self):
+        data = {
+            "output": [
+                {"type": "reasoning", "content": []},
+                {"type": "message", "content": [{"type": "output_text", "text": "hello"}]},
+            ]
+        }
+        self.assertEqual(_extract_output_text(data), "hello")
+
+    def test_legacy_chat_shape_fallback(self):
+        data = {"choices": [{"message": {"content": "legacy text"}}]}
+        self.assertEqual(_extract_output_text(data), "legacy text")
+
+    def test_empty_output_raises(self):
+        with self.assertRaises(ValueError):
+            _extract_output_text({"output": []})
+
+
 class MuseClientTest(unittest.TestCase):
+    def test_responses_endpoint_url(self):
+        client = _make_client(MagicMock())
+        self.assertEqual(client.responses_endpoint, "https://api.meta.ai/v1/responses")
+
+    def test_legacy_chat_url_is_migrated(self):
+        session = MagicMock()
+        client = MuseClient(
+            api_key="k",
+            endpoint="https://api.meta.ai/v1/chat/completions",
+            model_name=TEST_MODEL,
+            session=session,
+        )
+        self.assertEqual(client.responses_endpoint, "https://api.meta.ai/v1/responses")
+
     def test_approval_makes_zero_http_calls(self):
         session = MagicMock()
-        client = MuseClient(api_key="k", endpoint="https://api.meta.ai/v1", session=session)
+        client = _make_client(session)
         self.assertEqual(client.finalize_response("incoming", "MY DRAFT", "Yes, perfect"), "MY DRAFT")
         session.post.assert_not_called()
 
-    def test_suggestion_uses_tuned_params_and_cache(self):
+    def test_suggestion_follows_official_responses_format(self):
         session = MagicMock()
-        session.post.return_value = _mock_chat_response(
+        session.post.return_value = _mock_responses_body(
             json.dumps({
                 "spoken_intro": "intro",
                 "spoken_suggestion": "sugg?",
                 "suggested_reply": "reply",
             }),
-            usage={"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+            usage={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
         )
-        client = MuseClient(api_key="k", endpoint="https://api.meta.ai/v1", session=session)
+        client = _make_client(session)
         first = client.generate_vocal_suggestion("From Leo: hello")
+
+        # Transport assertions: official /v1/responses example shape.
+        url = session.post.call_args.args[0]
+        self.assertEqual(url, "https://api.meta.ai/v1/responses")
         payload = session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["model"], TEST_MODEL)
+        self.assertIs(payload["stream"], False)
         self.assertEqual(payload["temperature"], 0.3)
-        self.assertEqual(payload["max_tokens"], 300)
-        self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["max_output_tokens"], 800)
+        self.assertNotIn("messages", payload)
+        self.assertNotIn("response_format", payload)
+        self.assertNotIn("max_tokens", payload)
+        self.assertEqual(
+            [(item["role"], item["content"][0]["type"]) for item in payload["input"]],
+            [("system", "input_text"), ("user", "input_text")],
+        )
         self.assertEqual(first["suggested_reply"], "reply")
         # Identical request is served from cache: still exactly one HTTP call.
         self.assertEqual(client.generate_vocal_suggestion("From Leo: hello"), first)
         self.assertEqual(session.post.call_count, 1)
 
+    def test_finalize_uses_capped_output_tokens(self):
+        session = MagicMock()
+        session.post.return_value = _mock_responses_body("  Final text  ")
+        client = _make_client(session)
+        self.assertEqual(client.finalize_response("incoming", "draft", "Rewrite it formally"), "Final text")
+        payload = session.post.call_args.kwargs["json"]
+        self.assertEqual(payload["max_output_tokens"], 800)
+        self.assertIs(payload["stream"], False)
+
+    def test_generate_quick_replies(self):
+        session = MagicMock()
+        session.post.return_value = _mock_responses_body(
+            '{"summary": "Leo asked about the demo", "options": ["Option 1", "Option 2", "Option 3"]}'
+        )
+        client = _make_client(session)
+        qr = client.generate_quick_replies("Leo: Can we do the demo tomorrow?")
+        self.assertEqual(qr["sender"], "Leo")
+        self.assertEqual(len(qr["options"]), 3)
+        self.assertEqual(qr["options"][0], "Option 1")
+
     def test_api_failure_falls_back_without_raising(self):
         session = MagicMock()
         session.post.side_effect = Exception("boom")
-        client = MuseClient(api_key="k", endpoint="https://api.meta.ai/v1", session=session)
+        client = _make_client(session)
         suggestion = client.generate_vocal_suggestion("From Zoe: hi")
         self.assertEqual(suggestion["sender"], "Zoe")
         self.assertIn("suggested_reply", suggestion)

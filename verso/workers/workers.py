@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 import time
-from typing import Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import pyperclip
 
@@ -31,12 +31,16 @@ class WorkerManager:
         deliverables_dir: str = "deliverables",
         on_status_change: Optional[Callable[[str], None]] = None,
         on_task_completed: Optional[Callable[[Optional[TaskRecord]], None]] = None,
+        on_quick_replies: Optional[Callable[[Dict[str, Any]], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
+        voice_enabled: bool = True,
     ) -> None:
         self.deliverables_dir = deliverables_dir
         self.on_status_change = on_status_change
         self.on_task_completed = on_task_completed
+        self.on_quick_replies = on_quick_replies
         self.on_error = on_error
+        self.voice_enabled = voice_enabled
         self.muse_client = MuseClient()
         self._is_busy: bool = False
         self._busy_lock = threading.Lock()
@@ -50,7 +54,7 @@ class WorkerManager:
 
     @staticmethod
     def _parse_sender_and_message(context_details: str) -> Tuple[str, str]:
-        sender = "Someone"
+        sender = ""
         clean_msg = context_details.strip()
         if "From " in clean_msg and ":" in clean_msg:
             try:
@@ -65,12 +69,16 @@ class WorkerManager:
             if sender.startswith(prefix):
                 sender = sender[len(prefix):].strip()
 
-        if not sender or sender.lower() == "slack":
+        if not sender or sender.lower() in ("slack", "someone"):
             if ":" in clean_msg:
                 possible_name, rem = clean_msg.split(":", 1)
-                if len(possible_name.split()) <= 3:
+                if 1 <= len(possible_name.split()) <= 4 and not possible_name.lower().startswith("http"):
                     sender = possible_name.strip()
                     clean_msg = rem.strip()
+
+        for prefix in ("Slack |", "Slack -", "Slack:", "Slack"):
+            if sender.startswith(prefix):
+                sender = sender[len(prefix):].strip()
 
         if not sender:
             sender = "Someone"
@@ -104,6 +112,41 @@ class WorkerManager:
         try:
             sender, clean_msg = self._parse_sender_and_message(context_details)
 
+            # -------------------------------------------------------------
+            # SILENT / QUICK RESPONSE MODE (Voice Deactivated)
+            # -------------------------------------------------------------
+            if not self.voice_enabled:
+                if self.on_status_change:
+                    self.on_status_change(f"Generating quick replies for {sender}...")
+
+                quick_data = self.muse_client.generate_quick_replies(context_details)
+                quick_payload = {
+                    "sender": sender,
+                    "message": clean_msg,
+                    "context_details": context_details,
+                    "trigger_source": trigger_source,
+                    "summary": quick_data.get("summary", ""),
+                    "options": quick_data.get("options", []),
+                }
+
+                if self.on_quick_replies:
+                    self.on_quick_replies(quick_payload)
+
+                SoundService.play_chime()
+                NotificationService.notify(
+                    title="V.E.R.S.O.",
+                    message=f"Quick replies ready for {sender} · Choose an option",
+                    subtitle="Quick Replies Ready",
+                    sound=True,
+                )
+
+                if self.on_status_change:
+                    self.on_status_change(f"Quick replies ready for {sender} · Choose an option")
+                return
+
+            # -------------------------------------------------------------
+            # VOCAL INTERACTION MODE (Voice Activated)
+            # -------------------------------------------------------------
             # 1. Formulate a single, natural conversational spoken prompt (no robotic instructions)
             if clean_msg.endswith("?"):
                 vocal_prompt = f"{sender} asks: '{clean_msg}'. Would you like me to reply?"
@@ -111,7 +154,7 @@ class WorkerManager:
                 vocal_prompt = f"{sender} sent: '{clean_msg}'. Would you like to reply?"
 
             if self.on_status_change:
-                self.on_status_change(f"Incoming message from {sender} 🔊")
+                self.on_status_change(f"Incoming message · {sender} 🔊")
 
             # 2. Assistant speaks the alert naturally in one single breath
             prompt_done = threading.Event()
@@ -147,9 +190,9 @@ class WorkerManager:
             user_speech = captured_speech[0] or "Yes, approve."
 
             if self.on_status_change:
-                self.on_status_change(f"Understood: '{user_speech}' · Drafting with Muse Spark...")
+                self.on_status_change(f"Understood: '{user_speech}' · Drafting with Muse...")
 
-            # 7. Refine final draft using Muse Spark 1.3 based on user's exact words
+            # 7. Refine final draft using Muse based on user's exact words
             final_response = self.muse_client.finalize_response(
                 incoming_message=context_details,
                 suggested_reply=f"Hi {sender}, thank you for reaching out! I am taking care of this and will follow up shortly.",

@@ -1,17 +1,21 @@
 """
 V.E.R.S.O. - Meta Muse AI Client (Pillar 1: The Inverse OS)
-Optimized client for the Meta Muse API (Muse Spark 1.3) covering Slack
-intention delegation, vocal assistance, and resilient local fallback.
+Optimized client for the Meta Muse Responses API covering Slack intention
+delegation, vocal assistance, and resilient local fallback.
+
+Transport follows the official Meta example exactly: POST ``{base}/responses``
+with ``{"model", "input": [{"role", "content": [{"type": "input_text",
+"text"}]}], "stream": False}``.
 
 Optimization strategy:
 - Single shared ``requests.Session`` with connection pooling and automatic
   retries (exponential backoff on 429/5xx) instead of one-shot ``requests.post``.
-- Bounded generation parameters (low temperature, capped ``max_tokens``) to
+- Bounded generation parameters (low temperature, capped output tokens) to
   cut cost and latency on short, deterministic drafts.
 - Input truncation so a large clipboard paste can never explode token usage.
 - Short-circuit for vocal approvals (no API call when the user just says yes).
 - Small in-memory TTL cache to deduplicate identical suggestion requests.
-- One shared ``_chat`` transport helper (no duplicated request code).
+- One shared ``_request`` transport helper (no duplicated request code).
 """
 
 import hashlib
@@ -69,14 +73,29 @@ def _truncate(text: str, max_chars: int = MUSE_MAX_INPUT_CHARS) -> str:
 
 
 def _extract_sender(incoming_context: str) -> Tuple[str, str]:
-    """Splits an optional 'From <sender>: <message>' payload."""
+    """Splits an incoming message to extract the sender name and clean text."""
     clean_msg = (incoming_context or "").strip()
-    sender = "Slack"
+    sender = ""
     if clean_msg.startswith("From ") and ":" in clean_msg:
         head, _, tail = clean_msg[len("From "):].partition(":")
         if head.strip() and tail.strip():
             sender = head.strip()
             clean_msg = tail.strip()
+    elif ":" in clean_msg:
+        possible_sender, _, rem = clean_msg.partition(":")
+        parts = possible_sender.strip().split()
+        if 1 <= len(parts) <= 4 and not possible_sender.lower().startswith("http"):
+            sender = possible_sender.strip()
+            clean_msg = rem.strip()
+
+    # Strip notification wrappers like "Slack |", "Slack -", "Slack:"
+    for prefix in ("Slack |", "Slack -", "Slack:", "Slack"):
+        if sender.startswith(prefix):
+            sender = sender[len(prefix):].strip()
+
+    if not sender or sender.lower() in ("slack", "someone"):
+        sender = "Someone"
+
     return sender, clean_msg
 
 
@@ -108,6 +127,34 @@ def _parse_json_object(content: str) -> Dict[str, Any]:
     return parsed
 
 
+def _extract_output_text(data: Dict[str, Any]) -> str:
+    """Extracts the assistant text from a Responses API body.
+
+    Primary shape: ``{"output": [{"content": [{"type": "output_text",
+    "text": ...}]}]}``. Also tolerates the legacy chat-completions shape
+    (``{"choices": [{"message": {"content": ...}}]}``) as a fallback.
+    """
+    output = data.get("output")
+    if isinstance(output, list):
+        parts: List[str] = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            for block in item.get("content") or []:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    parts.append(block["text"])
+        text = "".join(parts).strip()
+        if text:
+            return text
+    try:
+        legacy = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        legacy = ""
+    if isinstance(legacy, str) and legacy.strip():
+        return legacy.strip()
+    raise ValueError("Muse response contains no readable output text")
+
+
 class _TtlCache:
     """Minimal thread-safe TTL cache keyed by request fingerprint."""
 
@@ -137,7 +184,7 @@ class _TtlCache:
 
 
 class MuseClient:
-    """Optimized client for the Meta Muse API (Muse Spark 1.3)."""
+    """Optimized client for the Meta Muse Responses API."""
 
     def __init__(
         self,
@@ -191,55 +238,71 @@ class MuseClient:
         return bool(self.api_key and self.endpoint)
 
     @property
-    def chat_endpoint(self) -> str:
-        """Returns the full chat completions URL."""
+    def responses_endpoint(self) -> str:
+        """Returns the full Responses API URL (``{base}/responses``)."""
         base = (self.endpoint or "https://api.meta.ai/v1").rstrip("/")
         if base.endswith("/chat/completions"):
+            base = base[: -len("/chat/completions")]  # migrate legacy chat-style URL
+        if base.endswith("/responses"):
             return base
-        return f"{base}/chat/completions"
+        return f"{base}/responses"
 
     # -- Transport -----------------------------------------------------
 
-    def _chat(
+    def _request(
         self,
-        messages: List[Dict[str, str]],
-        max_tokens: int,
-        json_mode: bool = False,
+        system_prompt: str,
+        user_text: str,
+        max_output_tokens: int,
     ) -> str:
-        """Sends one chat-completions request and returns the assistant content."""
+        """Sends one Responses API request and returns the assistant text.
+
+        Payload follows the official Meta example: ``model`` + ``input``
+        content blocks + ``"stream": False`` (+ standard ``temperature`` and
+        ``max_output_tokens`` bounds). Strict-JSON behavior is enforced via
+        the prompt text and the tolerant ``_parse_json_object`` parser.
+        """
         payload: Dict[str, Any] = {
             "model": self.model_name,
-            "messages": messages,
+            "input": [
+                {
+                    "role": "system",
+                    "content": [{"type": "input_text", "text": system_prompt}],
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": user_text}],
+                },
+            ],
             "temperature": self.temperature,
-            "max_tokens": max_tokens,
+            "max_output_tokens": max_output_tokens,
+            "stream": False,
         }
-        if json_mode:
-            payload["response_format"] = {"type": "json_object"}
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         resp = self._session.post(
-            self.chat_endpoint, json=payload, headers=headers, timeout=self.timeout
+            self.responses_endpoint, json=payload, headers=headers, timeout=self.timeout
         )
         resp.raise_for_status()
         data = resp.json()
         usage = data.get("usage") or {}
         if usage:
             logger.debug(
-                "Muse usage model=%s prompt=%s completion=%s total=%s",
+                "Muse usage model=%s input=%s output=%s total=%s",
                 self.model_name,
-                usage.get("prompt_tokens"),
-                usage.get("completion_tokens"),
+                usage.get("input_tokens", usage.get("prompt_tokens")),
+                usage.get("output_tokens", usage.get("completion_tokens")),
                 usage.get("total_tokens"),
             )
-        return data["choices"][0]["message"]["content"]
+        return _extract_output_text(data)
 
     # -- Public API ----------------------------------------------------
 
     def generate_vocal_suggestion(self, incoming_context: str) -> Dict[str, str]:
         """
-        Analyzes the incoming communication using Muse Spark 1.3.
+        Analyzes the incoming communication using the Muse Responses API.
         Returns:
             - sender: Name of sender (e.g. 'Sarah')
             - spoken_intro: Message read out loud to user
@@ -278,13 +341,10 @@ class MuseClient:
                 'the message), "spoken_suggestion" (one short question proposing a '
                 'reply), "suggested_reply" (professional draft ready to send).'
             )
-            content = self._chat(
-                messages=[
-                    {"role": "system", "content": SUGGESTION_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=MUSE_MAX_TOKENS_SUGGESTION,
-                json_mode=True,
+            content = self._request(
+                SUGGESTION_SYSTEM_PROMPT,
+                prompt,
+                MUSE_MAX_TOKENS_SUGGESTION,
             )
             parsed = _parse_json_object(content)
             result = {
@@ -298,7 +358,7 @@ class MuseClient:
             self._suggestion_cache.put(cache_key, result)
             return dict(result)
         except Exception as exc:
-            logger.warning("Muse Spark 1.3 request failed (%s), using fallback template.", exc)
+            logger.warning("Muse (%s) request failed (%s), using fallback template.", self.model_name, exc)
             return fallback()
 
     def finalize_response(
@@ -310,7 +370,7 @@ class MuseClient:
         """
         Finalizes the draft response based on user's vocal feedback.
         If user approved ('yes', 'approve', 'confirm', 'go'), keeps suggested_reply
-        without any API call. Otherwise refines the draft using Muse Spark 1.3.
+        without any API call. Otherwise refines the draft using Muse.
         """
         # Zero-cost path: plain approval reuses the existing draft.
         if _is_vocal_approval(user_speech):
@@ -334,19 +394,17 @@ class MuseClient:
                 f"User directive: '{clipped_directive}'\n\n"
                 "Rewrite the final reply per the directive."
             )
-            content = self._chat(
-                messages=[
-                    {"role": "system", "content": FINALIZE_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                max_tokens=MUSE_MAX_TOKENS_FINALIZE,
+            content = self._request(
+                FINALIZE_SYSTEM_PROMPT,
+                prompt,
+                MUSE_MAX_TOKENS_FINALIZE,
             )
             final = content.strip()
             if not final:
                 raise ValueError("Muse returned an empty refinement")
             return final
         except Exception as exc:
-            logger.warning("Muse Spark refinement failed (%s), using direct template.", exc)
+            logger.warning("Muse (%s) refinement failed (%s), using direct template.", self.model_name, exc)
             return f"Hello,\n\nRegarding your message: {clipped_directive}.\n\nBest regards."
 
     def generate_response(
@@ -360,3 +418,59 @@ class MuseClient:
             "action_title": f"Vocal Slack Exchange ({suggestion['sender']})",
             "content": suggestion["suggested_reply"],
         }
+
+    def generate_quick_replies(self, incoming_context: str) -> Dict[str, Any]:
+        """
+        Generates 3 diverse quick response options for silent / non-vocal mode.
+        Returns:
+            - sender: Name of sender
+            - summary: Short 1-sentence summary of the message
+            - options: List of 3 distinct, professional ready-to-send options
+        """
+        sender, clean_msg = _extract_sender(incoming_context)
+        clipped = _truncate(clean_msg)
+
+        def fallback() -> Dict[str, Any]:
+            return {
+                "sender": sender,
+                "summary": f"{sender}: {clipped}",
+                "options": [
+                    f"Hi {sender}, yes, sounds good! I will take care of this right away.",
+                    f"Hi {sender}, I am currently busy in a meeting, but will follow up shortly.",
+                    f"Hi {sender}, thanks for reaching out. Let me review and get back to you later today.",
+                ],
+            }
+
+        if not self.is_configured:
+            return fallback()
+
+        cache_key = hashlib.sha256(f"quick_replies:{sender}:{clipped}".encode("utf-8")).hexdigest()
+        cached = self._suggestion_cache.get(cache_key)
+        if cached is not None:
+            return dict(cached)
+
+        try:
+            prompt = (
+                f"Incoming communication from '{sender}': '{clipped}'.\n"
+                "Generate 3 diverse, professional quick reply options ready to send.\n"
+                'Return strict JSON with keys: "options" (list of 3 strings), "summary" (short string).'
+            )
+            content = self._request(
+                "You are V.E.R.S.O., generating quick reply options for incoming messages. Output strict JSON only.",
+                prompt,
+                800,
+            )
+            parsed = _parse_json_object(content)
+            raw_options = parsed.get("options")
+            if not isinstance(raw_options, list) or len(raw_options) < 2:
+                raise ValueError("Muse returned invalid quick options list")
+            result = {
+                "sender": sender,
+                "summary": str(parsed.get("summary", "")).strip(),
+                "options": [str(opt).strip() for opt in raw_options[:3]],
+            }
+            self._suggestion_cache.put(cache_key, result)
+            return dict(result)
+        except Exception as exc:
+            logger.warning("Muse (%s) quick replies request failed (%s), using fallback template.", self.model_name, exc)
+            return fallback()

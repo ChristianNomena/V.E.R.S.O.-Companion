@@ -12,15 +12,16 @@ import subprocess
 import threading
 import time
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import flet as ft
 import pyperclip
 
-from verso.database import TaskRecord, get_recent_tasks, update_task_title
+from verso.database import TaskRecord, get_recent_tasks, insert_task, update_task_title
 from verso.sentinel import Sentinel
 from verso.sentinel.clipboard_sensor import ClipboardSensor
 from verso.services.notification_service import NotificationService
+from verso.services.sound_service import SoundService
 from verso.workers import WorkerManager
 
 logger = logging.getLogger(__name__)
@@ -152,10 +153,21 @@ def open_system_security_settings() -> None:
         logger.error("Failed to open system security settings: %s", exc)
 
 
+def _default_chrome_height() -> float:
+    """Initial title-bar height estimate (auto-refined by calibration)."""
+    system = platform.system()
+    if system == "Darwin":
+        return 28.0
+    if system == "Windows":
+        return 32.0
+    return 30.0
+
+
 def create_app(page: ft.Page) -> None:
     current_theme = "dark"
     colors = THEMES[current_theme]
     is_history_open: bool = False
+    worker_manager: Optional[WorkerManager] = None
 
     # Window Configuration (initial size 460x700, user-resizable)
     page.title = "V.E.R.S.O."
@@ -163,6 +175,8 @@ def create_app(page: ft.Page) -> None:
     page.bgcolor = colors["page_bg"]
     page.window.width = 460
     page.window.height = 700
+    page.window.min_width = 380
+    page.window.min_height = 500
     page.window.resizable = True
     page.window.prevent_close = True
     page.padding = 0
@@ -209,11 +223,11 @@ def create_app(page: ft.Page) -> None:
         tooltip="Start / Pause Listening",
     )
 
-    # Always On Top (Foreground Pin) Toggle Button
-    is_always_on_top: bool = False
-    pin_icon = ft.Icon(icon=ft.Icons.PUSH_PIN_OUTLINED, size=18, color=colors["text_secondary"])
-    pin_btn = ft.Container(
-        content=pin_icon,
+    # Voice Mode Toggle Button (Activated vs Deactivated)
+    is_voice_enabled: bool = True
+    voice_toggle_icon = ft.Icon(icon=ft.Icons.MIC_ROUNDED, size=18, color=colors["idle_icon"])
+    voice_toggle_btn = ft.Container(
+        content=voice_toggle_icon,
         width=38,
         height=38,
         border_radius=19,
@@ -221,10 +235,10 @@ def create_app(page: ft.Page) -> None:
         border=ft.Border.all(1, colors["top_btn_border"]),
         alignment=ft.Alignment(0, 0),
         ink=True,
-        tooltip="Pin Window on Top (Foreground)",
+        tooltip="Voice Mode: Active (Click to Deactivate)",
     )
 
-    # Mini Desktop Widget Mode Toggle Button
+    # Mini Desktop Widget Mode Toggle Button (always on top by design)
     widget_mode_icon = ft.Icon(icon=ft.Icons.PICTURE_IN_PICTURE_ALT_ROUNDED, size=18, color=colors["text_secondary"])
     widget_mode_btn = ft.Container(
         content=widget_mode_icon,
@@ -235,7 +249,7 @@ def create_app(page: ft.Page) -> None:
         border=ft.Border.all(1, colors["top_btn_border"]),
         alignment=ft.Alignment(0, 0),
         ink=True,
-        tooltip="Switch to Desktop Widget Mode",
+        tooltip="Switch to Widget Mode (always on top)",
     )
 
     theme_icon = ft.Icon(icon=ft.Icons.LIGHT_MODE_ROUNDED, size=20, color=colors["text_secondary"])
@@ -258,7 +272,7 @@ def create_app(page: ft.Page) -> None:
                 ft.Row([history_btn, home_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Container(expand=True),
                 ft.Row(
-                    [compact_toggle_btn, pin_btn, widget_mode_btn, theme_btn],
+                    [compact_toggle_btn, voice_toggle_btn, widget_mode_btn, theme_btn],
                     spacing=8,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER,
                 ),
@@ -381,13 +395,20 @@ def create_app(page: ft.Page) -> None:
         size=12,
         color=colors["text_muted"],
         weight=ft.FontWeight.W_400,
+        text_align=ft.TextAlign.CENTER,
+        no_wrap=False,
     )
 
-    status_row = ft.Row(
-        [status_dot, status_text],
-        alignment=ft.MainAxisAlignment.CENTER,
-        vertical_alignment=ft.CrossAxisAlignment.CENTER,
-        spacing=8,
+    status_row = ft.Container(
+        content=ft.Row(
+            [status_dot, status_text],
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            spacing=8,
+            wrap=True,
+        ),
+        padding=ft.Padding(left=20, top=0, right=20, bottom=0),
+        alignment=ft.Alignment(0, 0),
     )
 
     # 3.1 Central Response Card (surfaces the generated response with 1-click copy)
@@ -433,9 +454,18 @@ def create_app(page: ft.Page) -> None:
     copy_btn_text = ft.Text("Copy Response", size=11, weight=ft.FontWeight.W_600, color="#FFFFFF")
 
     latest_response_text: str = ""
-    saved_window_width: int = 460
-    saved_window_height: int = 700
+    saved_window_width: float = 460
+    saved_window_height: float = 700
     is_mini_mode: bool = False
+
+    # Live window-size tracking. Manual resizes are not reported back into
+    # page.window.width/height, so the real content size is captured from
+    # resize events and converted with a calibrated chrome delta.
+    live_content_width: Optional[float] = None
+    live_content_height: Optional[float] = None
+    chrome_dw: float = 0.0
+    chrome_dh: float = _default_chrome_height()
+    pending_probe: Optional[Tuple[float, float, float]] = None
 
     def copy_main_response(e=None) -> None:
         nonlocal latest_response_text
@@ -514,6 +544,14 @@ def create_app(page: ft.Page) -> None:
         spacing=8,
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
+    # The whole status zone is clickable: one tap on the left side of the
+    # widget returns to the full window (same action as the expand button,
+    # wired below next to exit_mini_mode).
+    mini_home_zone = ft.Container(
+        content=mini_left_row,
+        ink=True,
+        tooltip="Back to full window",
+    )
 
     mini_copy_icon = ft.Icon(icon=ft.Icons.CONTENT_COPY_ROUNDED, size=14, color="#FFFFFF")
     mini_copy_btn = ft.Container(
@@ -570,38 +608,21 @@ def create_app(page: ft.Page) -> None:
         tooltip="Start / Pause Listening",
     )
 
-    mini_pin_icon = ft.Icon(
-        icon=ft.Icons.PUSH_PIN_OUTLINED,
-        size=14,
-        color=colors["text_secondary"],
-    )
-    mini_pin_btn = ft.Container(
-        content=mini_pin_icon,
-        width=28,
-        height=28,
-        border_radius=6,
-        bgcolor=colors["top_btn_bg"],
-        border=ft.Border.all(1, colors["top_btn_border"]),
-        alignment=ft.Alignment(0, 0),
-        ink=True,
-        tooltip="Pin Window on Top (Foreground)",
-    )
-
+    # Primary widget action: back to the full window (accent filled, always visible).
     mini_expand_icon = ft.Icon(
         icon=ft.Icons.OPEN_IN_FULL_ROUNDED,
         size=14,
-        color=colors["text_secondary"],
+        color="#FFFFFF",
     )
     mini_expand_btn = ft.Container(
         content=mini_expand_icon,
         width=28,
         height=28,
         border_radius=6,
-        bgcolor=colors["top_btn_bg"],
-        border=ft.Border.all(1, colors["top_btn_border"]),
+        bgcolor="#0284C7",
         alignment=ft.Alignment(0, 0),
         ink=True,
-        tooltip="Expand to Full Companion Window",
+        tooltip="Back to full window",
     )
 
     def exit_app(e=None) -> None:
@@ -630,19 +651,41 @@ def create_app(page: ft.Page) -> None:
         tooltip="Exit V.E.R.S.O.",
     )
 
+    mini_voice_icon = ft.Icon(icon=ft.Icons.MIC_ROUNDED, size=14, color=colors["idle_icon"])
+    mini_voice_btn = ft.Container(
+        content=mini_voice_icon,
+        width=28,
+        height=28,
+        border_radius=6,
+        bgcolor=colors["top_btn_bg"],
+        border=ft.Border.all(1, colors["top_btn_border"]),
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        tooltip="Voice Mode: Active (Click to Deactivate)",
+    )
+
     mini_actions_row = ft.Row(
-        [mini_copy_btn, mini_sentinel_btn, mini_pin_btn, mini_expand_btn, mini_close_btn],
+        [mini_copy_btn, mini_voice_btn, mini_sentinel_btn, mini_expand_btn, mini_close_btn],
         spacing=6,
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
     mini_widget_row = ft.Row(
-        [mini_left_row, ft.Container(expand=True), mini_actions_row],
+        [mini_home_zone, ft.Container(expand=True), mini_actions_row],
         vertical_alignment=ft.CrossAxisAlignment.CENTER,
     )
 
+    # Quick-reply buttons shown directly below the widget row in mini mode, so
+    # the user can 1-click an answer without opening the full window.
+    MINI_COMPACT_HEIGHT = 76
+    MINI_OPTION_ROW_H = 54
+    mini_options_col = ft.Column([], spacing=6)
+
     mini_widget_view = ft.Container(
-        content=mini_widget_row,
+        content=ft.Column(
+            [mini_widget_row, mini_options_col],
+            spacing=6,
+        ),
         expand=True,
         bgcolor=colors["panel_bg"],
         padding=ft.Padding(left=12, top=6, right=12, bottom=6),
@@ -654,6 +697,149 @@ def create_app(page: ft.Page) -> None:
         bgcolor=colors["panel_bg"],
         border_radius=6,
         padding=10,
+    )
+
+    # -----------------------------------------------------------------
+    # Quick Replies Card (Voice Deactivated / Silent Mode)
+    # -----------------------------------------------------------------
+    current_quick_payload: Dict[str, Any] = {}
+
+    quick_badge = ft.Container(
+        content=ft.Text(
+            "QUICK REPLIES",
+            size=10,
+            weight=ft.FontWeight.W_700,
+            style=ft.TextStyle(letter_spacing=0.8, color=colors["badge_slack_text"]),
+        ),
+        bgcolor=colors["badge_slack_bg"],
+        border_radius=4,
+        padding=ft.Padding(left=6, top=2, right=6, bottom=2),
+    )
+
+    quick_sender_text = ft.Text(
+        "",
+        size=11,
+        weight=ft.FontWeight.W_600,
+        color=colors["text_secondary"],
+        expand=True,
+        max_lines=1,
+        overflow=ft.TextOverflow.ELLIPSIS,
+    )
+
+    def dismiss_quick_replies(e=None) -> None:
+        quick_replies_card.visible = False
+        collapse_mini_options()
+        page.update()
+
+    quick_close_btn = ft.IconButton(
+        icon=ft.Icons.CLOSE_ROUNDED,
+        icon_size=16,
+        icon_color=colors["text_muted"],
+        tooltip="Dismiss",
+        on_click=dismiss_quick_replies,
+    )
+
+    quick_summary_text = ft.Text(
+        "",
+        size=12,
+        color=colors["text_primary"],
+        weight=ft.FontWeight.W_500,
+    )
+
+    quick_summary_box = ft.Container(
+        content=quick_summary_text,
+        bgcolor=colors["panel_bg"],
+        border_radius=6,
+        padding=10,
+    )
+
+    quick_options_col = ft.Column([], spacing=8)
+
+    need_another_icon = ft.Icon(icon=ft.Icons.REFRESH_ROUNDED, size=14, color=colors["idle_icon"])
+    need_another_label = ft.Text(
+        "Need another response?",
+        size=11,
+        weight=ft.FontWeight.W_500,
+        color=colors["idle_icon"],
+    )
+    need_another_btn = ft.Container(
+        content=ft.Row(
+            [need_another_icon, need_another_label],
+            spacing=4,
+            alignment=ft.MainAxisAlignment.CENTER,
+        ),
+        ink=True,
+        border_radius=6,
+        padding=ft.Padding(left=10, top=6, right=10, bottom=6),
+        bgcolor=colors["badge_slack_bg"],
+        tooltip="Generate fresh alternative replies",
+    )
+
+    quick_custom_input = ft.TextField(
+        hint_text="Or type custom reply / instructions...",
+        hint_style=ft.TextStyle(size=11, color=colors["text_muted"]),
+        text_size=12,
+        color=colors["text_primary"],
+        border_color=colors["card_border"],
+        focused_border_color=colors["idle_icon"],
+        border_radius=6,
+        content_padding=ft.Padding(left=10, top=6, right=10, bottom=6),
+        expand=True,
+    )
+
+    quick_custom_send_icon = ft.Icon(icon=ft.Icons.SEND_ROUNDED, size=14, color="#FFFFFF")
+    quick_custom_send_btn = ft.Container(
+        content=quick_custom_send_icon,
+        width=32,
+        height=32,
+        border_radius=6,
+        bgcolor="#0284C7",
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        tooltip="Send Custom Response",
+    )
+
+    quick_replies_card = ft.Container(
+        width=380,
+        margin=ft.Margin(left=20, top=14, right=20, bottom=10),
+        padding=14,
+        border_radius=10,
+        bgcolor=colors["card_bg"],
+        border=ft.Border.all(1, colors["card_border"]),
+        visible=False,
+        animate=ft.Animation(250, ft.AnimationCurve.EASE_OUT),
+        content=ft.Column(
+            [
+                ft.Row(
+                    [
+                        ft.Row(
+                            [quick_badge, quick_sender_text],
+                            spacing=8,
+                            expand=True,
+                            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        ),
+                        quick_close_btn,
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                quick_summary_box,
+                ft.Text(
+                    "Choose a quick reply:",
+                    size=11,
+                    weight=ft.FontWeight.W_600,
+                    color=colors["text_secondary"],
+                ),
+                quick_options_col,
+                ft.Divider(height=1, color=colors["card_border"]),
+                ft.Row([need_another_btn], alignment=ft.MainAxisAlignment.CENTER),
+                ft.Row(
+                    [quick_custom_input, quick_custom_send_btn],
+                    spacing=6,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+            ],
+            spacing=10,
+        ),
     )
 
     response_card = ft.Container(
@@ -694,17 +880,20 @@ def create_app(page: ft.Page) -> None:
     # 3.2 Home View (Companion Center with large tactile button)
     home_view = ft.Column(
         [
-            ft.Container(expand=True),
+            ft.Container(height=16),
             title,
-            ft.Container(height=28),
+            ft.Container(height=24),
             toggle_container,
-            ft.Container(height=20),
+            ft.Container(height=18),
             status_row,
+            quick_replies_card,
             response_card,
-            ft.Container(expand=True),
+            ft.Container(height=24),
         ],
         horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+        alignment=ft.MainAxisAlignment.CENTER,
         spacing=0,
+        scroll=ft.ScrollMode.AUTO,
     )
 
     # 3.3 Details View (Task Details with editable title, full exchange, and copy button)
@@ -1090,6 +1279,8 @@ def create_app(page: ft.Page) -> None:
 
     # Helper function to check if current window width supports docked panel
     def is_wide_enough() -> bool:
+        if live_content_width is not None:
+            return live_content_width >= BREAKPOINT_WIDTH
         current_w = page.width or (page.window.width if hasattr(page.window, "width") else 460) or 460
         return current_w >= BREAKPOINT_WIDTH
 
@@ -1169,84 +1360,123 @@ def create_app(page: ft.Page) -> None:
 
     history_btn.on_click = toggle_history
 
-    def update_pin_visuals() -> None:
-        c = THEMES[current_theme]
-        if is_always_on_top:
-            pin_icon.icon = ft.Icons.PUSH_PIN_ROUNDED
-            pin_icon.color = c["badge_slack_text"]
-            pin_btn.bgcolor = c["badge_slack_bg"]
-            pin_btn.border = ft.Border.all(1, c["badge_slack_text"])
-            pin_btn.tooltip = "Pinned on Top (Foreground)"
+    def sync_window() -> None:
+        """Pushes pending window-geometry changes in a dedicated patch.
 
-            mini_pin_icon.icon = ft.Icons.PUSH_PIN_ROUNDED
-            mini_pin_icon.color = c["badge_slack_text"]
-            mini_pin_btn.bgcolor = c["badge_slack_bg"]
-            mini_pin_btn.border = ft.Border.all(1, c["badge_slack_text"])
-            mini_pin_btn.tooltip = "Pinned on Top (Foreground)"
-        else:
-            pin_icon.icon = ft.Icons.PUSH_PIN_OUTLINED
-            pin_icon.color = c["text_secondary"]
-            pin_btn.bgcolor = c["top_btn_bg"]
-            pin_btn.border = ft.Border.all(1, c["top_btn_border"])
-            pin_btn.tooltip = "Pin Window on Top (Foreground)"
+        Whole-page updates do not reliably pick up nested ``page.window``
+        mutations (size silently never applied in either direction), while a
+        targeted ``window.update()`` always emits a precise patch. Falls back
+        to the page update when the window is not attached yet.
+        """
+        try:
+            page.window.update()
+        except RuntimeError:
+            # Window not attached to the page yet (e.g. pre-mount) — the
+            # following page.update() is the only channel available.
+            pass
 
-            mini_pin_icon.icon = ft.Icons.PUSH_PIN_OUTLINED
-            mini_pin_icon.color = c["text_secondary"]
-            mini_pin_btn.bgcolor = c["top_btn_bg"]
-            mini_pin_btn.border = ft.Border.all(1, c["top_btn_border"])
-            mini_pin_btn.tooltip = "Pin Window on Top (Foreground)"
+    def _best_window_size() -> Tuple[float, float]:
+        """Best-known full window size (chrome included).
 
-    def toggle_pin(e=None) -> None:
-        nonlocal is_always_on_top
-        is_always_on_top = not is_always_on_top
-        page.window.always_on_top = is_always_on_top
-        update_pin_visuals()
-        page.update()
-
-    pin_btn.on_click = toggle_pin
-    mini_pin_btn.on_click = toggle_pin
+        Uses live resize-event data + calibrated chrome when available (manual
+        resizes are not reported back into page.window.*); otherwise the
+        programmatic values, which are exact when nothing was resized manually.
+        """
+        if live_content_width is not None and live_content_height is not None:
+            return live_content_width + chrome_dw, live_content_height + chrome_dh
+        return page.window.width or 460, page.window.height or 700
 
     def enter_mini_mode(e=None) -> None:
-        nonlocal saved_window_width, saved_window_height, is_mini_mode, is_always_on_top
+        nonlocal saved_window_width, saved_window_height, is_mini_mode
+        nonlocal pending_probe
         if is_history_open:
             close_history()
 
-        saved_window_width = page.window.width or 460
-        saved_window_height = page.window.height or 700
+        if not is_mini_mode:
+            saved_window_width, saved_window_height = _best_window_size()
         is_mini_mode = True
 
-        # Pinned by default in desktop widget mode
-        is_always_on_top = True
+        # Pending quick replies follow into the widget for 1-click answers.
+        pending_options = (
+            current_quick_payload.get("options", [])
+            if quick_replies_card.visible
+            else []
+        )
+        render_mini_options(pending_options)
+        target_height = MINI_COMPACT_HEIGHT + len(pending_options) * MINI_OPTION_ROW_H
+
+        # Widget mode is always on top by design (pinned desktop widget).
+        # Staged for shrink: relax constraints first, shrink, then lock minimums
+        # to the exact widget size so the user cannot shrink the widget.
         page.window.always_on_top = True
         page.window.min_width = 280
         page.window.min_height = 68
+        sync_window()
         page.window.width = 330
-        page.window.height = 76
-        page.window.resizable = False
+        page.window.height = target_height
+        sync_window()
+        page.window.min_width = 330
+        page.window.min_height = target_height
+        sync_window()
+        pending_probe = (330, target_height, time.monotonic() + 2.0)
 
-        update_pin_visuals()
         root_container.content = mini_widget_view
         page.update()
 
     def exit_mini_mode(e=None) -> None:
-        nonlocal is_mini_mode, is_always_on_top
+        nonlocal is_mini_mode, pending_probe
         is_mini_mode = False
+        pending_probe = None  # exit events must never calibrate (no cross-talk)
 
-        # Unpinned by default when returning to normal full window mode
-        is_always_on_top = False
+        # Full window mode restores regular window state (not pinned).
+        # Staged for grow: resize while unconstrained, then tighten minimums.
         page.window.always_on_top = False
-        page.window.resizable = True
+        page.window.width = max(380, saved_window_width)
+        page.window.height = max(500, saved_window_height)
+        sync_window()
         page.window.min_width = 380
         page.window.min_height = 500
-        page.window.width = max(460, saved_window_width)
-        page.window.height = max(700, saved_window_height)
+        sync_window()
 
-        update_pin_visuals()
         root_container.content = full_stack
         page.update()
 
     widget_mode_btn.on_click = enter_mini_mode
     mini_expand_btn.on_click = exit_mini_mode
+    mini_home_zone.on_click = exit_mini_mode
+
+    def update_voice_visuals() -> None:
+        c = THEMES[current_theme]
+        if is_voice_enabled:
+            voice_toggle_icon.icon = ft.Icons.MIC_ROUNDED
+            voice_toggle_icon.color = c["idle_icon"]
+            voice_toggle_btn.tooltip = "Voice Mode: Active (Click to Deactivate)"
+            mini_voice_icon.icon = ft.Icons.MIC_ROUNDED
+            mini_voice_icon.color = c["idle_icon"]
+            mini_voice_btn.tooltip = "Voice Mode: Active (Click to Deactivate)"
+        else:
+            voice_toggle_icon.icon = ft.Icons.MIC_OFF_ROUNDED
+            voice_toggle_icon.color = c["text_muted"]
+            voice_toggle_btn.tooltip = "Voice Mode: Deactivated / Quick Replies (Click to Activate)"
+            mini_voice_icon.icon = ft.Icons.MIC_OFF_ROUNDED
+            mini_voice_icon.color = c["text_muted"]
+            mini_voice_btn.tooltip = "Voice Mode: Deactivated / Quick Replies (Click to Activate)"
+
+    def toggle_voice_mode(e=None) -> None:
+        nonlocal is_voice_enabled
+        is_voice_enabled = not is_voice_enabled
+        if worker_manager is not None:
+            worker_manager.voice_enabled = is_voice_enabled
+        update_voice_visuals()
+        c = THEMES[current_theme]
+        if is_voice_enabled:
+            status_text.value = "Voice Mode active · Natural vocal interaction"
+        else:
+            status_text.value = "Voice Mode deactivated · Quick reply buttons"
+        page.update()
+
+    voice_toggle_btn.on_click = toggle_voice_mode
+    mini_voice_btn.on_click = toggle_voice_mode
 
     def on_window_event(e: ft.WindowEvent) -> None:
         """Intercepts window close: switches to widget mode first, or exits if already in widget mode."""
@@ -1260,8 +1490,44 @@ def create_app(page: ft.Page) -> None:
 
     page.window.on_event = on_window_event
 
-    def on_window_resize(e):
-        """Dynamically adapts between docked panel and overlay drawer as the user resizes."""
+    def on_window_resize(e) -> None:
+        """Tracks live size (manual resizes are not reported back into
+        page.window.*), calibrates chrome from our own widget resize, and
+        adapts the history layout."""
+        nonlocal live_content_width, live_content_height
+        nonlocal chrome_dw, chrome_dh, pending_probe
+        try:
+            event_w = float(e.width)
+            event_h = float(e.height)
+        except (TypeError, ValueError, AttributeError):
+            event_w = None
+            event_h = None
+        if event_w is not None and event_h is not None:
+            if (
+                pending_probe is not None
+                and is_mini_mode
+                and time.monotonic() <= pending_probe[2]
+            ):
+                # Event answers our own widget resize (window is exactly the
+                # probed size): measure the real chrome delta for conversions.
+                chrome_dw = pending_probe[0] - event_w
+                chrome_dh = pending_probe[1] - event_h
+                pending_probe = None
+            elif is_mini_mode:
+                # Lock widget size: snap back any user resize attempt. The target
+                # follows the shown content (compact, or grown for options).
+                intended_h = float(MINI_COMPACT_HEIGHT + len(mini_options_col.controls) * MINI_OPTION_ROW_H)
+                target_content_w = 330.0 - chrome_dw
+                target_content_h = intended_h - chrome_dh
+                if abs(event_w - target_content_w) > 2 or abs(event_h - target_content_h) > 2:
+                    page.window.width = event_w + chrome_dw
+                    page.window.height = event_h + chrome_dh
+                    sync_window()
+                    page.window.width = 330
+                    page.window.height = intended_h
+                    sync_window()
+            else:
+                live_content_width, live_content_height = event_w, event_h
         if not is_mini_mode and is_history_open:
             update_history_layout()
 
@@ -1486,6 +1752,29 @@ def create_app(page: ft.Page) -> None:
         response_card_inner.bgcolor = c["panel_bg"]
         response_close_btn.icon_color = c["text_muted"]
 
+        # Quick Replies Card Styling
+        quick_replies_card.bgcolor = c["card_bg"]
+        quick_replies_card.border = ft.Border.all(1, c["card_border"])
+        quick_badge.bgcolor = c["badge_slack_bg"]
+        quick_badge.content.color = c["badge_slack_text"]
+        quick_sender_text.color = c["text_secondary"]
+        quick_summary_box.bgcolor = c["panel_bg"]
+        quick_summary_text.color = c["text_primary"]
+        quick_close_btn.icon_color = c["text_muted"]
+        need_another_btn.bgcolor = c["badge_slack_bg"]
+        need_another_icon.color = c["idle_icon"]
+        need_another_label.color = c["idle_icon"]
+        quick_custom_input.color = c["text_primary"]
+        quick_custom_input.border_color = c["card_border"]
+        quick_custom_input.focused_border_color = c["idle_icon"]
+
+        # Voice Mode Buttons Styling
+        voice_toggle_btn.bgcolor = c["top_btn_bg"]
+        voice_toggle_btn.border = ft.Border.all(1, c["top_btn_border"])
+        mini_voice_btn.bgcolor = c["top_btn_bg"]
+        mini_voice_btn.border = ft.Border.all(1, c["top_btn_border"])
+        update_voice_visuals()
+
         # Top Bar Home & Compact Toggle Buttons
         home_icon.color = c["text_secondary"]
         home_btn.bgcolor = c["top_btn_bg"]
@@ -1525,9 +1814,10 @@ def create_app(page: ft.Page) -> None:
         mini_sentinel_btn.border = ft.Border.all(1, c["top_btn_border"])
         mini_sentinel_icon.color = c["active_icon"] if sentinel.is_running else c["idle_icon"]
 
-        mini_expand_btn.bgcolor = c["top_btn_bg"]
-        mini_expand_btn.border = ft.Border.all(1, c["top_btn_border"])
-        mini_expand_icon.color = c["text_secondary"]
+        # Expand stays the accent primary action in both themes (same as copy buttons).
+        mini_expand_btn.bgcolor = "#0284C7"
+        mini_expand_btn.border = None
+        mini_expand_icon.color = "#FFFFFF"
 
         mini_close_btn.bgcolor = c["top_btn_bg"]
         mini_close_btn.border = ft.Border.all(1, c["top_btn_border"])
@@ -1536,8 +1826,6 @@ def create_app(page: ft.Page) -> None:
         widget_mode_icon.color = c["text_secondary"]
         widget_mode_btn.bgcolor = c["top_btn_bg"]
         widget_mode_btn.border = ft.Border.all(1, c["top_btn_border"])
-
-        update_pin_visuals()
 
         render_history_items()
         page.update()
@@ -1608,8 +1896,21 @@ def create_app(page: ft.Page) -> None:
             mini_dot.bgcolor = "#F59E0B"
             mini_icon.icon = ft.Icons.AUTO_AWESOME_ROUNDED
             mini_icon.color = "#F59E0B"
-            mini_status_label.value = "Drafting with Muse Spark..."
+            mini_status_label.value = "Drafting with Muse..."
             mini_status_label.color = "#F59E0B"
+        elif "quick repl" in msg_lower or "choose an option" in msg_lower:
+            status_dot.bgcolor = "#10B981"
+            btn_icon.icon = ft.Icons.TOUCH_APP_ROUNDED
+            btn_icon.color = "#10B981"
+            toggle_container.border = ft.Border.all(2.0, "#10B981")
+            status_text.weight = ft.FontWeight.W_500
+            status_text.color = c["text_primary"]
+
+            mini_dot.bgcolor = "#10B981"
+            mini_icon.icon = ft.Icons.TOUCH_APP_ROUNDED
+            mini_icon.color = "#10B981"
+            mini_status_label.value = "Quick replies ready!"
+            mini_status_label.color = "#10B981"
         elif sentinel.is_running:
             status_dot.bgcolor = c["idle_icon"]
             btn_icon.icon = ft.Icons.STOP_ROUNDED
@@ -1673,11 +1974,282 @@ def create_app(page: ft.Page) -> None:
         render_history_items()
         page.update()
 
+    def render_quick_options(options: List[str]) -> None:
+        c = THEMES[current_theme]
+        quick_options_col.controls.clear()
+        for idx, opt_text in enumerate(options, start=1):
+            def make_handler(reply_str: str):
+                return lambda e: select_quick_reply(reply_str)
+
+            badge = ft.Container(
+                content=ft.Text(f"{idx}", size=11, weight=ft.FontWeight.BOLD, color=c["badge_slack_text"]),
+                width=22,
+                height=22,
+                border_radius=11,
+                bgcolor=c["badge_slack_bg"],
+                alignment=ft.Alignment(0, 0),
+            )
+            text_control = ft.Text(
+                opt_text,
+                size=12,
+                color=c["text_primary"],
+                expand=True,
+                selectable=False,
+            )
+            copy_icon = ft.Icon(icon=ft.Icons.CONTENT_COPY_ROUNDED, size=14, color=c["text_muted"])
+
+            option_row = ft.Row(
+                [badge, text_control, copy_icon],
+                spacing=8,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            )
+            option_container = ft.Container(
+                content=option_row,
+                bgcolor=c["panel_bg"],
+                border=ft.Border.all(1, c["panel_border"]),
+                border_radius=8,
+                padding=10,
+                ink=True,
+                on_click=make_handler(opt_text),
+                tooltip=f"Click to copy Option {idx} to clipboard",
+            )
+            quick_options_col.controls.append(option_container)
+
+    def render_mini_options(options: List[str]) -> None:
+        """Renders compact 1-click reply buttons below the mini widget row."""
+        c = THEMES[current_theme]
+        mini_options_col.controls.clear()
+        for idx, opt_text in enumerate(options, start=1):
+            def make_handler(reply_str: str):
+                return lambda e: select_quick_reply(reply_str)
+
+            badge = ft.Container(
+                content=ft.Text(f"{idx}", size=10, weight=ft.FontWeight.BOLD, color=c["badge_slack_text"]),
+                width=20,
+                height=20,
+                border_radius=10,
+                bgcolor=c["badge_slack_bg"],
+                alignment=ft.Alignment(0, 0),
+            )
+            text_control = ft.Text(
+                opt_text,
+                size=11,
+                color=c["text_primary"],
+                expand=True,
+                max_lines=2,
+                overflow=ft.TextOverflow.ELLIPSIS,
+            )
+            option_container = ft.Container(
+                content=ft.Row(
+                    [badge, text_control],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
+                bgcolor=c["card_bg"],
+                border=ft.Border.all(1, c["card_border"]),
+                border_radius=8,
+                padding=8,
+                ink=True,
+                on_click=make_handler(opt_text),
+                tooltip=opt_text,
+            )
+            mini_options_col.controls.append(option_container)
+
+    def grow_mini_for_options(count: int) -> None:
+        """Grows the widget window to fit quick-reply buttons (mini mode only)."""
+        nonlocal pending_probe
+        if not is_mini_mode or count <= 0:
+            return
+        expanded = MINI_COMPACT_HEIGHT + count * MINI_OPTION_ROW_H
+        page.window.height = expanded
+        page.window.min_height = expanded
+        sync_window()
+        pending_probe = (330, expanded, time.monotonic() + 2.0)
+        page.update()
+
+    def collapse_mini_options() -> None:
+        """Clears widget buttons and restores the compact locked widget size."""
+        nonlocal pending_probe
+        was_expanded = len(mini_options_col.controls) > 0
+        mini_options_col.controls.clear()
+        if is_mini_mode and was_expanded:
+            # Staged like enter: relax, shrink, then re-lock to exact size.
+            page.window.min_height = 68
+            sync_window()
+            page.window.height = MINI_COMPACT_HEIGHT
+            sync_window()
+            page.window.min_height = MINI_COMPACT_HEIGHT
+            sync_window()
+            pending_probe = (330, MINI_COMPACT_HEIGHT, time.monotonic() + 2.0)
+            page.update()
+
+    def select_quick_reply(chosen_reply: str) -> None:
+        nonlocal latest_response_text
+        if not chosen_reply:
+            return
+
+        latest_response_text = chosen_reply
+        ClipboardSensor.ignore_content(chosen_reply)
+        try:
+            pyperclip.copy(chosen_reply)
+            page.set_clipboard(chosen_reply)
+        except Exception:
+            pass
+
+        sender = current_quick_payload.get("sender", "Slack User")
+        context_details = current_quick_payload.get("context_details", "")
+        trigger_source = current_quick_payload.get("trigger_source", "SLACK_INTENT")
+
+        task_record: Optional[TaskRecord] = None
+        try:
+            task_record = insert_task(
+                action_title=f"{sender}",
+                trigger_source=trigger_source,
+                status="COMPLETED",
+                incoming_message=context_details,
+                ai_suggestion="Quick Reply Option",
+                user_response="Selected 1-click option",
+                final_response=chosen_reply,
+            )
+        except Exception as exc:
+            logger.error("Failed to insert quick reply task record: %s", exc)
+
+        SoundService.play_done()
+        NotificationService.notify(
+            title="V.E.R.S.O.",
+            message=f"Quick reply for {sender} copied to clipboard (Cmd+V)!",
+            subtitle="Response Ready",
+            sound=True,
+        )
+
+        quick_replies_card.visible = False
+        collapse_mini_options()
+        on_task_completed(task_record)
+        status_text.value = f"Quick reply copied to clipboard (Cmd+V) · {sender}"
+        page.update()
+
+    def on_need_another_response(e=None) -> None:
+        context_details = current_quick_payload.get("context_details", "")
+        if not context_details or worker_manager is None:
+            return
+
+        need_another_label.value = "Generating alternatives..."
+        page.update()
+
+        def fetch_new_options():
+            try:
+                fresh_data = worker_manager.muse_client.generate_quick_replies(
+                    f"{context_details} (Please provide alternative, distinct responses)"
+                )
+                new_options = fresh_data.get("options", [])
+                if new_options:
+                    current_quick_payload["options"] = new_options
+                    render_quick_options(new_options)
+                    render_mini_options(new_options)
+                    grow_mini_for_options(len(new_options))
+            except Exception as exc:
+                logger.warning("Failed to generate alternative replies: %s", exc)
+            finally:
+                need_another_label.value = "Need another response?"
+                page.update()
+
+        threading.Thread(target=fetch_new_options, daemon=True).start()
+
+    need_another_btn.on_click = on_need_another_response
+
+    def submit_custom_reply(e=None) -> None:
+        user_input = (quick_custom_input.value or "").strip()
+        if not user_input or worker_manager is None:
+            return
+
+        sender = current_quick_payload.get("sender", "Slack User")
+        context_details = current_quick_payload.get("context_details", "")
+        trigger_source = current_quick_payload.get("trigger_source", "SLACK_INTENT")
+
+        quick_custom_input.value = ""
+        need_another_label.value = "Refining response with Muse Spark..."
+        page.update()
+
+        def process_custom():
+            nonlocal latest_response_text
+            try:
+                final_reply = worker_manager.muse_client.finalize_response(
+                    incoming_message=context_details,
+                    suggested_reply=f"Hi {sender}, thank you for reaching out.",
+                    user_speech=user_input,
+                )
+            except Exception:
+                final_reply = user_input
+
+            latest_response_text = final_reply
+            ClipboardSensor.ignore_content(final_reply)
+            try:
+                pyperclip.copy(final_reply)
+                page.set_clipboard(final_reply)
+            except Exception:
+                pass
+
+            task_record: Optional[TaskRecord] = None
+            try:
+                task_record = insert_task(
+                    action_title=f"{sender}",
+                    trigger_source=trigger_source,
+                    status="COMPLETED",
+                    incoming_message=context_details,
+                    ai_suggestion="Custom instruction",
+                    user_response=user_input,
+                    final_response=final_reply,
+                )
+            except Exception as exc:
+                logger.error("Failed to insert custom reply task: %s", exc)
+
+            SoundService.play_done()
+            NotificationService.notify(
+                title="V.E.R.S.O.",
+                message=f"Custom response for {sender} copied to clipboard (Cmd+V)!",
+                subtitle="Response Ready",
+                sound=True,
+            )
+
+            quick_replies_card.visible = False
+            collapse_mini_options()
+            need_another_label.value = "Need another response?"
+            on_task_completed(task_record)
+            status_text.value = f"Response copied to clipboard (Cmd+V) · {sender}"
+            page.update()
+
+        threading.Thread(target=process_custom, daemon=True).start()
+
+    quick_custom_send_btn.on_click = submit_custom_reply
+    quick_custom_input.on_submit = submit_custom_reply
+
+    def on_quick_replies_received(payload: Dict[str, Any]) -> None:
+        nonlocal current_quick_payload
+        current_quick_payload = payload
+        sender = payload.get("sender", "Slack User")
+        summary = payload.get("summary", "")
+        options = payload.get("options", [])
+
+        quick_sender_text.value = f"{sender}"
+        quick_summary_text.value = summary or payload.get("message", "")
+        render_quick_options(options)
+        render_mini_options(options)
+        grow_mini_for_options(len(options))
+
+        response_card.visible = False
+        quick_replies_card.visible = True
+        status_text.value = f"Quick replies ready for {sender} · Choose an option"
+        mini_status_label.value = "Quick replies ready!"
+        mini_status_label.color = "#10B981"
+        page.update()
+
     worker_manager = WorkerManager(
         deliverables_dir="deliverables",
         on_status_change=on_status_change,
         on_task_completed=on_task_completed,
+        on_quick_replies=on_quick_replies_received,
         on_error=show_error,
+        voice_enabled=is_voice_enabled,
     )
 
     def on_context_detected(context_type: str, payload: str) -> None:
