@@ -14,7 +14,7 @@ from verso.config import META_MUSE_API_KEY, META_MUSE_ENDPOINT
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are V.E.R.S.O. (Vigilant Empathetic Real-time System Orchestrator), operating on the Verso (The Inverse OS).
+SYSTEM_PROMPT = """You are V.E.R.S.O. (Vigilant Empathetic Real-time System Orchestrator).
 Your role: Silently assist the user by analyzing incoming Slack communications and crafting clear, professional, and empathetic draft responses.
 You must output a strict JSON object with the following keys:
 - "notification": Concise push notification alert (e.g. "Slack response draft ready in deliverables/SLACK_DRAFT.md").
@@ -94,7 +94,7 @@ class MuseClient:
             "Hello! Thank you for the update. I have reviewed the details and I am taking care of this right away. "
             "I'll follow up with you as soon as it's completed.\n\n"
             "---\n"
-            "*Generated silently by V.E.R.S.O. (The Inverse OS) on the backstage.*\n"
+            "*Generated silently by V.E.R.S.O.*\n"
         )
 
         return {

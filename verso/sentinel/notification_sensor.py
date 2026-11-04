@@ -9,7 +9,7 @@ import os
 import platform
 import plistlib
 import sqlite3
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +51,46 @@ class NotificationSensor:
         self,
         db_path: Optional[str] = None,
         simulation_file: str = "deliverables/.simulate_slack.txt",
+        on_error: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.current_os = platform.system()
         self.db_path = db_path if db_path is not None else get_default_notification_db_path()
         self.simulation_file = simulation_file
+        self.on_error = on_error
         self.last_rec_id: int = -1
         self._permission_warned: bool = False
         self._initialized: bool = False
+
+    def check_permission(self) -> Tuple[bool, str]:
+        """
+        Verifies if system notifications can be read on the current OS.
+        Returns (True, "") if accessible, or (False, error_reason) if blocked.
+        """
+        if self.current_os == "Darwin":
+            if not self.db_path or not os.path.exists(self.db_path):
+                return True, ""
+            try:
+                conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+                cursor = conn.cursor()
+                cursor.execute("SELECT MAX(rec_id) FROM record;")
+                conn.close()
+                return True, ""
+            except (PermissionError, sqlite3.OperationalError):
+                return False, (
+                    "Full Disk Access permission is required to read notifications. "
+                    "Enable it in: System Settings > Privacy & Security > Full Disk Access."
+                )
+            except Exception as exc:
+                return False, f"Notification database access error: {exc}"
+        elif self.current_os == "Windows":
+            if self.db_path and os.path.exists(self.db_path):
+                try:
+                    conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True)
+                    conn.close()
+                    return True, ""
+                except Exception as exc:
+                    return False, f"Windows notification database access error: {exc}"
+        return True, ""
 
     def initialize_baseline(self) -> None:
         """Sets the baseline rec_id to ignore notifications created before app launch."""
@@ -140,9 +173,16 @@ class NotificationSensor:
                     results.append(notification)
 
             conn.close()
-            self._permission_warned = False
+            if self._permission_warned:
+                self._permission_warned = False
+                if self.on_error:
+                    self.on_error("")
 
         except (PermissionError, sqlite3.OperationalError) as exc:
+            error_msg = (
+                "Full Disk Access permission is required to read notifications. "
+                "Enable it in: System Settings > Privacy & Security > Full Disk Access."
+            )
             if not self._permission_warned:
                 logger.warning(
                     "Cannot read macOS Notification Center database (%s). "
@@ -152,6 +192,8 @@ class NotificationSensor:
                     exc,
                 )
                 self._permission_warned = True
+            if self.on_error:
+                self.on_error(error_msg)
 
         return results
 

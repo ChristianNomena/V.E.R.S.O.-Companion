@@ -23,10 +23,12 @@ class WorkerManager:
         deliverables_dir: str = "deliverables",
         on_status_change: Optional[Callable[[str], None]] = None,
         on_task_completed: Optional[Callable[[], None]] = None,
+        on_error: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.deliverables_dir = deliverables_dir
         self.on_status_change = on_status_change
         self.on_task_completed = on_task_completed
+        self.on_error = on_error
         self.muse_client = MuseClient()
         os.makedirs(self.deliverables_dir, exist_ok=True)
 
@@ -101,5 +103,7 @@ class WorkerManager:
 
         except Exception as exc:
             logger.error("Error executing background worker task: %s", exc)
+            if self.on_error:
+                self.on_error(f"Backstage worker error: {exc}")
             if self.on_status_change:
                 self.on_status_change("Error during backstage execution.")

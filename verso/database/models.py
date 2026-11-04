@@ -1,5 +1,5 @@
 """
-V.E.R.S.O. - Database Models (Pillar 1: The Inverse OS)
+V.E.R.S.O. - Database Models
 Defines the local data model for tracking Slack intentions and background executions.
 """
 

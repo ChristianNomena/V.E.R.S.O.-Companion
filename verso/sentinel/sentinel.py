@@ -7,7 +7,7 @@ before triggering autonomous background workers.
 import logging
 import threading
 import time
-from typing import Callable, Optional
+from typing import Callable, Optional, Tuple
 
 from verso.sentinel.clipboard_sensor import ClipboardSensor
 from verso.sentinel.notification_sensor import NotificationSensor
@@ -27,12 +27,16 @@ class Sentinel:
         poll_interval: float = 1.5,
         cooldown_seconds: float = 20.0,
         on_context_detected: Optional[Callable[[str, str], None]] = None,
+        on_error: Optional[Callable[[str], None]] = None,
+        on_state_change: Optional[Callable[[bool], None]] = None,
     ) -> None:
         self.poll_interval = poll_interval
         self.cooldown_seconds = cooldown_seconds
         self.on_context_detected = on_context_detected
+        self.on_error = on_error
+        self.on_state_change = on_state_change
 
-        self.notification_sensor = NotificationSensor()
+        self.notification_sensor = NotificationSensor(on_error=self._handle_sensor_error)
         self.clipboard_sensor = ClipboardSensor()
         self._is_running = False
         self._thread: Optional[threading.Thread] = None
@@ -40,14 +44,40 @@ class Sentinel:
         self._last_detected_key: str = ""
         self._last_trigger_time: float = 0.0
 
+    def _handle_sensor_error(self, error_msg: str) -> None:
+        if error_msg:
+            logger.warning("Sensor error encountered: %s", error_msg)
+            if self.on_error:
+                self.on_error(error_msg)
+            if self._is_running:
+                self.stop()
+        else:
+            if self.on_error:
+                self.on_error("")
+
     @property
     def is_running(self) -> bool:
         return self._is_running
 
-    def start(self) -> None:
-        """Starts the sentinel loop in a background thread."""
+    def check_readiness(self) -> Tuple[bool, str]:
+        """Checks if sensors are authorized and ready to begin monitoring."""
+        return self.notification_sensor.check_permission()
+
+    def start(self) -> Tuple[bool, str]:
+        """
+        Attempts to start the sentinel loop in a background thread.
+        Returns (True, "") on success, or (False, error_reason) if blocked by permission/error.
+        """
         if self._is_running:
-            return
+            return True, ""
+
+        ok, reason = self.check_readiness()
+        if not ok:
+            logger.warning("V.E.R.S.O. Sentinel blocked from starting: %s", reason)
+            if self.on_error:
+                self.on_error(reason)
+            return False, reason
+
         self._is_running = True
         self.notification_sensor.initialize_baseline()
         self._thread = threading.Thread(
@@ -55,13 +85,19 @@ class Sentinel:
         )
         self._thread.start()
         logger.info("V.E.R.S.O. Sentinel started.")
+        if self.on_state_change:
+            self.on_state_change(True)
+        return True, ""
 
     def stop(self) -> None:
         """Stops the background sentinel."""
+        was_running = self._is_running
         self._is_running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
         logger.info("V.E.R.S.O. Sentinel stopped.")
+        if was_running and self.on_state_change:
+            self.on_state_change(False)
 
     def _loop(self) -> None:
         while self._is_running:
@@ -69,6 +105,10 @@ class Sentinel:
                 self._tick()
             except Exception as exc:
                 logger.error("Error in sentinel tick: %s", exc)
+                if self.on_error:
+                    self.on_error(f"Sensor error: {exc}")
+                self.stop()
+                break
             time.sleep(self.poll_interval)
 
     def _tick(self) -> None:

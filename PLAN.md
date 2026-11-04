@@ -90,9 +90,9 @@
 
 - [x] Configurer la fenêtre Flet en mode sombre et format compact
 - [x] Ajouter le bouton de bascule pour démarrer ou suspendre la sentinelle Slack
-- [ ] Ajouter l'indicateur d'état en direct (icône ou anneau animé + message textuel)
-- [ ] Ajouter la liste dynamique affichant l'historique des intentions Slack traitées
-- [ ] Implémenter le rafraîchissement automatique de la liste dès qu'une tâche se termine
+- [x] Ajouter l'indicateur d'état en direct (point animé + message textuel d'activité)
+- [x] Ajouter le panneau escamotable (Toggle Pane) masquant l'historique dynamique des intentions
+- [x] Implémenter le rafraîchissement automatique de la liste dès qu'une tâche se termine
 
 ---
 
