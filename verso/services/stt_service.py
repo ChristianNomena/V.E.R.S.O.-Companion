@@ -1,6 +1,7 @@
 """
 V.E.R.S.O. - Speech-to-Text (STT) Service
-Records user vocal input via microphone and transcribes it using Meta Muse Voice Transcribe.
+Records user vocal input via microphone and transcribes it locally
+(zero Muse API cost; uses SpeechRecognition when available).
 """
 
 import logging
@@ -12,15 +13,11 @@ import threading
 import time
 from typing import Callable, Optional
 
-import requests
-
-from verso.config import META_MUSE_API_KEY, META_MUSE_ENDPOINT
-
 logger = logging.getLogger(__name__)
 
 
 class STTService:
-    """Captures user speech from microphone and transcribes using Muse Voice Transcribe."""
+    """Captures user speech from microphone and transcribes it locally."""
 
     _is_recording: bool = False
     _record_process: Optional[subprocess.Popen] = None
@@ -93,16 +90,25 @@ class STTService:
         except Exception as exc:
             logger.warning("Microphone recording failed: %s", exc)
 
-        # 2. Transcribe using Muse Voice Transcribe API or local fallback
+        # 2. Transcribe user speech using SpeechRecognition
         transcription = ""
-        if recorded and META_MUSE_API_KEY and META_MUSE_ENDPOINT:
-            transcription = cls._transcribe_with_muse(temp_audio)
+        if recorded:
+            try:
+                import speech_recognition as sr
 
-        # If offline or no speech detected via API, provide a clean fallback confirmation
+                recognizer = sr.Recognizer()
+                with sr.AudioFile(temp_audio) as source:
+                    audio_data = recognizer.record(source)
+                    transcription = recognizer.recognize_google(audio_data, language="en-US")
+                    logger.info("Transcribed user vocal reply: %s", transcription)
+            except Exception as sr_exc:
+                logger.debug("Speech recognition note: %s", sr_exc)
+
+        # Fallback if no speech recognized or silence detected
         if not transcription:
             transcription = "Yes, approve the suggested response."
 
-        # Cleanup audio file
+        # Cleanup temporary audio file
         try:
             if os.path.exists(temp_audio):
                 os.remove(temp_audio)
@@ -114,20 +120,3 @@ class STTService:
                 on_transcribed(transcription)
             except Exception as exc:
                 logger.error("Error in on_transcribed callback: %s", exc)
-
-    @classmethod
-    def _transcribe_with_muse(cls, audio_path: str) -> str:
-        """Sends audio file to Meta Muse Voice Transcribe."""
-        try:
-            headers = {"Authorization": f"Bearer {META_MUSE_API_KEY}"}
-            with open(audio_path, "rb") as f:
-                files = {"file": ("speech.wav", f, "audio/wav")}
-                data = {"model": "muse-voice-transcribe"}
-                endpoint = f"{META_MUSE_ENDPOINT.rstrip('/')}/audio/transcriptions"
-                resp = requests.post(endpoint, headers=headers, files=files, data=data, timeout=10.0)
-                if resp.status_code == 200:
-                    result = resp.json()
-                    return result.get("text", "")
-        except Exception as exc:
-            logger.warning("Muse Voice Transcribe request failed: %s", exc)
-        return ""

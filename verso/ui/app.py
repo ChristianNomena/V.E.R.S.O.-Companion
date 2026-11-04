@@ -19,6 +19,7 @@ import pyperclip
 
 from verso.database import TaskRecord, get_recent_tasks, update_task_title
 from verso.sentinel import Sentinel
+from verso.sentinel.clipboard_sensor import ClipboardSensor
 from verso.services.notification_service import NotificationService
 from verso.workers import WorkerManager
 
@@ -163,6 +164,7 @@ def create_app(page: ft.Page) -> None:
     page.window.width = 460
     page.window.height = 700
     page.window.resizable = True
+    page.window.prevent_close = True
     page.padding = 0
 
     # 1. Top Bar Controls
@@ -204,7 +206,36 @@ def create_app(page: ft.Page) -> None:
         alignment=ft.Alignment(0, 0),
         ink=True,
         visible=False,
-        tooltip="Start / Pause Sentinel Listening",
+        tooltip="Start / Pause Listening",
+    )
+
+    # Always On Top (Foreground Pin) Toggle Button
+    is_always_on_top: bool = False
+    pin_icon = ft.Icon(icon=ft.Icons.PUSH_PIN_OUTLINED, size=18, color=colors["text_secondary"])
+    pin_btn = ft.Container(
+        content=pin_icon,
+        width=38,
+        height=38,
+        border_radius=19,
+        bgcolor=colors["top_btn_bg"],
+        border=ft.Border.all(1, colors["top_btn_border"]),
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        tooltip="Pin Window on Top (Foreground)",
+    )
+
+    # Mini Desktop Widget Mode Toggle Button
+    widget_mode_icon = ft.Icon(icon=ft.Icons.PICTURE_IN_PICTURE_ALT_ROUNDED, size=18, color=colors["text_secondary"])
+    widget_mode_btn = ft.Container(
+        content=widget_mode_icon,
+        width=38,
+        height=38,
+        border_radius=19,
+        bgcolor=colors["top_btn_bg"],
+        border=ft.Border.all(1, colors["top_btn_border"]),
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        tooltip="Switch to Desktop Widget Mode",
     )
 
     theme_icon = ft.Icon(icon=ft.Icons.LIGHT_MODE_ROUNDED, size=20, color=colors["text_secondary"])
@@ -226,7 +257,11 @@ def create_app(page: ft.Page) -> None:
             [
                 ft.Row([history_btn, home_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
                 ft.Container(expand=True),
-                ft.Row([compact_toggle_btn, theme_btn], spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                ft.Row(
+                    [compact_toggle_btn, pin_btn, widget_mode_btn, theme_btn],
+                    spacing=8,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                ),
             ],
             vertical_alignment=ft.CrossAxisAlignment.CENTER,
         ),
@@ -397,9 +432,17 @@ def create_app(page: ft.Page) -> None:
     copy_btn_icon = ft.Icon(icon=ft.Icons.CONTENT_COPY_ROUNDED, size=15, color="#FFFFFF")
     copy_btn_text = ft.Text("Copy Response", size=11, weight=ft.FontWeight.W_600, color="#FFFFFF")
 
+    latest_response_text: str = ""
+    saved_window_width: int = 460
+    saved_window_height: int = 700
+    is_mini_mode: bool = False
+
     def copy_main_response(e=None) -> None:
+        nonlocal latest_response_text
         if not response_body_text.value:
             return
+        latest_response_text = response_body_text.value
+        ClipboardSensor.ignore_content(response_body_text.value)
         try:
             pyperclip.copy(response_body_text.value)
             page.set_clipboard(response_body_text.value)
@@ -432,6 +475,178 @@ def create_app(page: ft.Page) -> None:
         ink=True,
         on_click=copy_main_response,
         tooltip="Copy directly to clipboard (Cmd+V)",
+    )
+
+    # 3.4 Mini Desktop Widget Layout
+    mini_dot = ft.Container(
+        width=8,
+        height=8,
+        shape=ft.BoxShape.CIRCLE,
+        bgcolor=colors["text_muted"],
+        animate=ft.Animation(300, ft.AnimationCurve.EASE_OUT),
+    )
+    mini_icon = ft.Icon(
+        icon=ft.Icons.RADIO_BUTTON_UNCHECKED_ROUNDED,
+        size=15,
+        color=colors["idle_icon"],
+    )
+    mini_brand_text = ft.Text(
+        "V.E.R.S.O.",
+        size=10,
+        weight=ft.FontWeight.W_700,
+        style=ft.TextStyle(letter_spacing=1.5, color=colors["text_primary"]),
+    )
+    mini_status_label = ft.Text(
+        "Idle",
+        size=10,
+        weight=ft.FontWeight.W_500,
+        color=colors["text_muted"],
+        max_lines=1,
+        overflow=ft.TextOverflow.ELLIPSIS,
+    )
+    mini_status_col = ft.Column(
+        [mini_brand_text, mini_status_label],
+        spacing=1,
+        alignment=ft.MainAxisAlignment.CENTER,
+    )
+    mini_left_row = ft.Row(
+        [mini_dot, mini_icon, mini_status_col],
+        spacing=8,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+    mini_copy_icon = ft.Icon(icon=ft.Icons.CONTENT_COPY_ROUNDED, size=14, color="#FFFFFF")
+    mini_copy_btn = ft.Container(
+        content=mini_copy_icon,
+        width=28,
+        height=28,
+        border_radius=6,
+        bgcolor="#0284C7",
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        visible=False,
+        tooltip="Copy Response (Cmd+V)",
+    )
+
+    def copy_mini_response(e=None) -> None:
+        nonlocal latest_response_text
+        if not latest_response_text:
+            return
+        ClipboardSensor.ignore_content(latest_response_text)
+        try:
+            pyperclip.copy(latest_response_text)
+            page.set_clipboard(latest_response_text)
+        except Exception:
+            pass
+        mini_copy_icon.icon = ft.Icons.CHECK_ROUNDED
+        mini_status_label.value = "Copied!"
+        page.update()
+
+        def reset_mini_btn():
+            time.sleep(2.0)
+            mini_copy_icon.icon = ft.Icons.CONTENT_COPY_ROUNDED
+            if latest_response_text:
+                mini_status_label.value = "Ready (Cmd+V)"
+            page.update()
+
+        threading.Thread(target=reset_mini_btn, daemon=True).start()
+
+    mini_copy_btn.on_click = copy_mini_response
+
+    mini_sentinel_icon = ft.Icon(
+        icon=ft.Icons.PLAY_ARROW_ROUNDED,
+        size=16,
+        color=colors["idle_icon"],
+    )
+    mini_sentinel_btn = ft.Container(
+        content=mini_sentinel_icon,
+        width=28,
+        height=28,
+        border_radius=6,
+        bgcolor=colors["top_btn_bg"],
+        border=ft.Border.all(1, colors["top_btn_border"]),
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        tooltip="Start / Pause Listening",
+    )
+
+    mini_pin_icon = ft.Icon(
+        icon=ft.Icons.PUSH_PIN_OUTLINED,
+        size=14,
+        color=colors["text_secondary"],
+    )
+    mini_pin_btn = ft.Container(
+        content=mini_pin_icon,
+        width=28,
+        height=28,
+        border_radius=6,
+        bgcolor=colors["top_btn_bg"],
+        border=ft.Border.all(1, colors["top_btn_border"]),
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        tooltip="Pin Window on Top (Foreground)",
+    )
+
+    mini_expand_icon = ft.Icon(
+        icon=ft.Icons.OPEN_IN_FULL_ROUNDED,
+        size=14,
+        color=colors["text_secondary"],
+    )
+    mini_expand_btn = ft.Container(
+        content=mini_expand_icon,
+        width=28,
+        height=28,
+        border_radius=6,
+        bgcolor=colors["top_btn_bg"],
+        border=ft.Border.all(1, colors["top_btn_border"]),
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        tooltip="Expand to Full Companion Window",
+    )
+
+    def exit_app(e=None) -> None:
+        page.window.prevent_close = False
+        page.update()
+        try:
+            page.run_task(page.window.destroy)
+        except Exception:
+            pass
+
+    mini_close_icon = ft.Icon(
+        icon=ft.Icons.CLOSE_ROUNDED,
+        size=14,
+        color=colors["text_muted"],
+    )
+    mini_close_btn = ft.Container(
+        content=mini_close_icon,
+        width=28,
+        height=28,
+        border_radius=6,
+        bgcolor=colors["top_btn_bg"],
+        border=ft.Border.all(1, colors["top_btn_border"]),
+        alignment=ft.Alignment(0, 0),
+        ink=True,
+        on_click=exit_app,
+        tooltip="Exit V.E.R.S.O.",
+    )
+
+    mini_actions_row = ft.Row(
+        [mini_copy_btn, mini_sentinel_btn, mini_pin_btn, mini_expand_btn, mini_close_btn],
+        spacing=6,
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+    mini_widget_row = ft.Row(
+        [mini_left_row, ft.Container(expand=True), mini_actions_row],
+        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+    )
+
+    mini_widget_view = ft.Container(
+        content=mini_widget_row,
+        expand=True,
+        bgcolor=colors["panel_bg"],
+        padding=ft.Padding(left=12, top=6, right=12, bottom=6),
+        border=ft.Border.all(1, colors["panel_border"]),
     )
 
     response_card_inner = ft.Container(
@@ -519,7 +734,7 @@ def create_app(page: ft.Page) -> None:
     def save_task_title(e=None):
         nonlocal current_selected_task_id
         if current_selected_task_id is not None:
-            new_title = details_title_field.value.strip() or "Slack Response"
+            new_title = details_title_field.value.strip() or "Response"
             update_task_title(current_selected_task_id, new_title)
             render_history_items()
             status_text.value = f"Title updated: {new_title}"
@@ -541,7 +756,7 @@ def create_app(page: ft.Page) -> None:
                     [
                         ft.Icon(icon=ft.Icons.FORUM_OUTLINED, size=15, color=colors["text_muted"]),
                         ft.Text(
-                            "RECEIVED MESSAGE (SLACK)",
+                            "RECEIVED MESSAGE",
                             size=10,
                             weight=ft.FontWeight.W_700,
                             style=ft.TextStyle(letter_spacing=1.0, color=colors["text_muted"]),
@@ -583,11 +798,14 @@ def create_app(page: ft.Page) -> None:
 
     details_response_text = ft.Text("", size=12, color=colors["text_primary"], selectable=True)
     details_copy_icon = ft.Icon(icon=ft.Icons.CONTENT_COPY_ROUNDED, size=15, color="#FFFFFF")
-    details_copy_text = ft.Text("Copy for Slack", size=11, weight=ft.FontWeight.W_600, color="#FFFFFF")
+    details_copy_text = ft.Text("Copy Response", size=11, weight=ft.FontWeight.W_600, color="#FFFFFF")
 
     def copy_details_response(e=None):
+        nonlocal latest_response_text
         if not details_response_text.value:
             return
+        latest_response_text = details_response_text.value
+        ClipboardSensor.ignore_content(details_response_text.value)
         try:
             pyperclip.copy(details_response_text.value)
             page.set_clipboard(details_response_text.value)
@@ -602,7 +820,7 @@ def create_app(page: ft.Page) -> None:
         def reset_btn():
             time.sleep(2.0)
             details_copy_icon.icon = ft.Icons.CONTENT_COPY_ROUNDED
-            details_copy_text.value = "Copy for Slack"
+            details_copy_text.value = "Copy Response"
             page.update()
 
         threading.Thread(target=reset_btn, daemon=True).start()
@@ -635,7 +853,7 @@ def create_app(page: ft.Page) -> None:
                             [
                                 ft.Icon(icon=ft.Icons.AUTO_AWESOME_ROUNDED, size=15, color=colors["badge_slack_text"]),
                                 ft.Text(
-                                    "READY RESPONSE FOR SLACK",
+                                    "READY RESPONSE",
                                     size=10,
                                     weight=ft.FontWeight.W_700,
                                     style=ft.TextStyle(letter_spacing=1.0, color=colors["badge_slack_text"]),
@@ -762,6 +980,8 @@ def create_app(page: ft.Page) -> None:
             details_dialogue_container.visible = False
 
         if task.final_response:
+            latest_response_text = task.final_response
+            mini_copy_btn.visible = True
             details_response_text.value = task.final_response
             details_response_container.visible = True
         else:
@@ -796,7 +1016,7 @@ def create_app(page: ft.Page) -> None:
     )
 
     def build_task_card(task: TaskRecord, c: Dict[str, Any]) -> ft.Container:
-        """Builds a clean, compact history list item displaying only title and timestamp."""
+        """Builds a clean, compact history list item with multiline text wrapping."""
         time_str = (
             task.timestamp.strftime("%H:%M")
             if isinstance(task.timestamp, datetime)
@@ -820,19 +1040,25 @@ def create_app(page: ft.Page) -> None:
                                 size=12,
                                 weight=ft.FontWeight.W_600,
                                 color=c["text_primary"],
-                                max_lines=1,
-                                overflow=ft.TextOverflow.ELLIPSIS,
+                                expand=True,
+                                no_wrap=False,
                             ),
                         ],
                         spacing=8,
-                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                        vertical_alignment=ft.CrossAxisAlignment.START,
                         expand=True,
                     ),
-                    ft.Text(time_str, size=10, color=c["text_muted"]),
-                    ft.Icon(icon=ft.Icons.CHEVRON_RIGHT_ROUNDED, size=16, color=c["text_muted"]),
+                    ft.Row(
+                        [
+                            ft.Text(time_str, size=10, color=c["text_muted"]),
+                            ft.Icon(icon=ft.Icons.CHEVRON_RIGHT_ROUNDED, size=16, color=c["text_muted"]),
+                        ],
+                        spacing=4,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
                 ],
                 alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
-                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                vertical_alignment=ft.CrossAxisAlignment.START,
             ),
         )
 
@@ -847,7 +1073,7 @@ def create_app(page: ft.Page) -> None:
         if not recent_tasks:
             placeholder = ft.Container(
                 content=ft.Text(
-                    "No tasks recorded yet.\nV.E.R.S.O. is listening for Slack intentions.",
+                    "No tasks recorded yet.\nV.E.R.S.O. is listening.",
                     size=12,
                     color=c["text_muted"],
                     text_align=ft.TextAlign.CENTER,
@@ -867,15 +1093,47 @@ def create_app(page: ft.Page) -> None:
         current_w = page.width or (page.window.width if hasattr(page.window, "width") else 460) or 460
         return current_w >= BREAKPOINT_WIDTH
 
+    pane_width: int = 300
+
+    def on_pane_drag(e: ft.DragUpdateEvent) -> None:
+        nonlocal pane_width
+        current_w = page.width or (page.window.width if hasattr(page.window, "width") else 460) or 460
+        max_allowed = max(240, int(current_w * 0.65)) if is_wide_enough() else max(240, int(current_w - 40))
+        new_width = max(220, min(max_allowed, pane_width + int(e.delta_x)))
+        pane_width = int(new_width)
+        if is_wide_enough():
+            docked_pane.width = pane_width
+        else:
+            overlay_drawer.width = pane_width
+        page.update()
+
+    def create_resizer_handle():
+        return ft.GestureDetector(
+            mouse_cursor=ft.MouseCursor.RESIZE_LEFT_RIGHT,
+            drag_interval=10,
+            on_pan_update=on_pane_drag,
+            content=ft.Container(
+                width=10,
+                bgcolor=ft.Colors.TRANSPARENT,
+                alignment=ft.Alignment(0, 0),
+                content=ft.Container(
+                    width=2,
+                    border_radius=1,
+                    bgcolor=colors["panel_border"],
+                ),
+            ),
+        )
+
     def update_history_layout() -> None:
         """Adapts the UI layout between docked left side panel and overlay drawer."""
         c = THEMES[current_theme]
         wide = is_wide_enough()
+        current_w = page.width or (page.window.width if hasattr(page.window, "width") else 460) or 460
 
         if not is_history_open:
             docked_pane.visible = False
             docked_pane.width = 0
-            overlay_drawer.left = -340
+            overlay_drawer.left = -max(340, pane_width + 40)
             backdrop.visible = False
             history_btn.bgcolor = c["top_btn_bg"]
             history_btn.border = ft.Border.all(1, c["top_btn_border"])
@@ -885,12 +1143,13 @@ def create_app(page: ft.Page) -> None:
 
             if wide:
                 docked_pane.visible = True
-                docked_pane.width = 280
-                overlay_drawer.left = -340
+                docked_pane.width = pane_width
+                overlay_drawer.left = -max(340, pane_width + 40)
                 backdrop.visible = False
             else:
                 docked_pane.visible = False
                 docked_pane.width = 0
+                overlay_drawer.width = min(pane_width, max(240, int(current_w - 40)))
                 overlay_drawer.left = 0
                 backdrop.visible = True
 
@@ -910,9 +1169,100 @@ def create_app(page: ft.Page) -> None:
 
     history_btn.on_click = toggle_history
 
+    def update_pin_visuals() -> None:
+        c = THEMES[current_theme]
+        if is_always_on_top:
+            pin_icon.icon = ft.Icons.PUSH_PIN_ROUNDED
+            pin_icon.color = c["badge_slack_text"]
+            pin_btn.bgcolor = c["badge_slack_bg"]
+            pin_btn.border = ft.Border.all(1, c["badge_slack_text"])
+            pin_btn.tooltip = "Pinned on Top (Foreground)"
+
+            mini_pin_icon.icon = ft.Icons.PUSH_PIN_ROUNDED
+            mini_pin_icon.color = c["badge_slack_text"]
+            mini_pin_btn.bgcolor = c["badge_slack_bg"]
+            mini_pin_btn.border = ft.Border.all(1, c["badge_slack_text"])
+            mini_pin_btn.tooltip = "Pinned on Top (Foreground)"
+        else:
+            pin_icon.icon = ft.Icons.PUSH_PIN_OUTLINED
+            pin_icon.color = c["text_secondary"]
+            pin_btn.bgcolor = c["top_btn_bg"]
+            pin_btn.border = ft.Border.all(1, c["top_btn_border"])
+            pin_btn.tooltip = "Pin Window on Top (Foreground)"
+
+            mini_pin_icon.icon = ft.Icons.PUSH_PIN_OUTLINED
+            mini_pin_icon.color = c["text_secondary"]
+            mini_pin_btn.bgcolor = c["top_btn_bg"]
+            mini_pin_btn.border = ft.Border.all(1, c["top_btn_border"])
+            mini_pin_btn.tooltip = "Pin Window on Top (Foreground)"
+
+    def toggle_pin(e=None) -> None:
+        nonlocal is_always_on_top
+        is_always_on_top = not is_always_on_top
+        page.window.always_on_top = is_always_on_top
+        update_pin_visuals()
+        page.update()
+
+    pin_btn.on_click = toggle_pin
+    mini_pin_btn.on_click = toggle_pin
+
+    def enter_mini_mode(e=None) -> None:
+        nonlocal saved_window_width, saved_window_height, is_mini_mode, is_always_on_top
+        if is_history_open:
+            close_history()
+
+        saved_window_width = page.window.width or 460
+        saved_window_height = page.window.height or 700
+        is_mini_mode = True
+
+        # Pinned by default in desktop widget mode
+        is_always_on_top = True
+        page.window.always_on_top = True
+        page.window.min_width = 280
+        page.window.min_height = 68
+        page.window.width = 330
+        page.window.height = 76
+        page.window.resizable = False
+
+        update_pin_visuals()
+        root_container.content = mini_widget_view
+        page.update()
+
+    def exit_mini_mode(e=None) -> None:
+        nonlocal is_mini_mode, is_always_on_top
+        is_mini_mode = False
+
+        # Unpinned by default when returning to normal full window mode
+        is_always_on_top = False
+        page.window.always_on_top = False
+        page.window.resizable = True
+        page.window.min_width = 380
+        page.window.min_height = 500
+        page.window.width = max(460, saved_window_width)
+        page.window.height = max(700, saved_window_height)
+
+        update_pin_visuals()
+        root_container.content = full_stack
+        page.update()
+
+    widget_mode_btn.on_click = enter_mini_mode
+    mini_expand_btn.on_click = exit_mini_mode
+
+    def on_window_event(e: ft.WindowEvent) -> None:
+        """Intercepts window close: switches to widget mode first, or exits if already in widget mode."""
+        nonlocal is_mini_mode
+        event_name = getattr(e, "data", "") or getattr(e, "type", "")
+        if event_name == "close" or getattr(e, "type", None) == ft.WindowEventType.CLOSE:
+            if not is_mini_mode:
+                enter_mini_mode()
+            else:
+                exit_app()
+
+    page.window.on_event = on_window_event
+
     def on_window_resize(e):
         """Dynamically adapts between docked panel and overlay drawer as the user resizes."""
-        if is_history_open:
+        if not is_mini_mode and is_history_open:
             update_history_layout()
 
     page.on_resize = on_window_resize
@@ -960,15 +1310,22 @@ def create_app(page: ft.Page) -> None:
         ),
     )
 
+    docked_resizer = create_resizer_handle()
     docked_pane = ft.Container(
         width=0,
         visible=False,
         bgcolor=colors["panel_bg"],
-        border=ft.Border(right=ft.BorderSide(1, colors["panel_border"])),
-        content=ft.Column(
+        content=ft.Row(
             [
-                docked_header,
-                list_docked,
+                ft.Column(
+                    [
+                        docked_header,
+                        list_docked,
+                    ],
+                    spacing=0,
+                    expand=True,
+                ),
+                docked_resizer,
             ],
             spacing=0,
             expand=True,
@@ -1029,6 +1386,7 @@ def create_app(page: ft.Page) -> None:
         ),
     )
 
+    drawer_resizer = create_resizer_handle()
     overlay_drawer = ft.Container(
         width=300,
         top=0,
@@ -1036,17 +1394,23 @@ def create_app(page: ft.Page) -> None:
         left=-340,
         animate_position=ft.Animation(300, ft.AnimationCurve.EASE_OUT_CUBIC),
         bgcolor=colors["panel_bg"],
-        border=ft.Border(right=ft.BorderSide(1, colors["panel_border"])),
         shadow=ft.BoxShadow(
             spread_radius=2,
             blur_radius=24,
             color="#000000",
             offset=ft.Offset(6, 0),
         ),
-        content=ft.Column(
+        content=ft.Row(
             [
-                drawer_header,
-                list_drawer,
+                ft.Column(
+                    [
+                        drawer_header,
+                        list_drawer,
+                    ],
+                    spacing=0,
+                    expand=True,
+                ),
+                drawer_resizer,
             ],
             spacing=0,
             expand=True,
@@ -1107,9 +1471,9 @@ def create_app(page: ft.Page) -> None:
 
         # Left Panels & Backdrop
         docked_pane.bgcolor = c["panel_bg"]
-        docked_pane.border = ft.Border(right=ft.BorderSide(1, c["panel_border"]))
+        docked_resizer.content.content.bgcolor = c["panel_border"]
         overlay_drawer.bgcolor = c["panel_bg"]
-        overlay_drawer.border = ft.Border(right=ft.BorderSide(1, c["panel_border"]))
+        drawer_resizer.content.content.bgcolor = c["panel_border"]
         backdrop.bgcolor = c["backdrop_color"]
 
         # Central Response Card
@@ -1144,6 +1508,37 @@ def create_app(page: ft.Page) -> None:
         details_response_container.border = ft.Border.all(1, c["idle_border"])
         details_response_text.color = c["text_primary"]
 
+        # Mini Desktop Widget Styling
+        mini_widget_view.bgcolor = c["panel_bg"]
+        mini_widget_view.border = ft.Border.all(1, c["panel_border"])
+        mini_brand_text.style.color = c["text_primary"]
+        if not sentinel.is_running:
+            mini_dot.bgcolor = c["text_muted"]
+            mini_status_label.color = c["text_muted"]
+            mini_icon.color = c["text_muted"]
+        else:
+            mini_dot.bgcolor = c["idle_icon"]
+            mini_status_label.color = c["text_secondary"]
+            mini_icon.color = c["idle_icon"]
+
+        mini_sentinel_btn.bgcolor = c["top_btn_bg"]
+        mini_sentinel_btn.border = ft.Border.all(1, c["top_btn_border"])
+        mini_sentinel_icon.color = c["active_icon"] if sentinel.is_running else c["idle_icon"]
+
+        mini_expand_btn.bgcolor = c["top_btn_bg"]
+        mini_expand_btn.border = ft.Border.all(1, c["top_btn_border"])
+        mini_expand_icon.color = c["text_secondary"]
+
+        mini_close_btn.bgcolor = c["top_btn_bg"]
+        mini_close_btn.border = ft.Border.all(1, c["top_btn_border"])
+        mini_close_icon.color = c["text_muted"]
+
+        widget_mode_icon.color = c["text_secondary"]
+        widget_mode_btn.bgcolor = c["top_btn_bg"]
+        widget_mode_btn.border = ft.Border.all(1, c["top_btn_border"])
+
+        update_pin_visuals()
+
         render_history_items()
         page.update()
 
@@ -1176,35 +1571,90 @@ def create_app(page: ft.Page) -> None:
         status_text.value = msg
         msg_lower = msg.lower()
 
-        if "speak" in msg_lower:
-            status_dot.bgcolor = "#38BDF8"  # Cyan for vocal speaking
-            btn_icon.icon = ft.Icons.RECORD_VOICE_OVER_ROUNDED
-            btn_icon.color = "#38BDF8"
-        elif "listen" in msg_lower:
-            status_dot.bgcolor = "#EC4899"  # Vibrant pink for listening to user
+        if "listening to you" in msg_lower or "speak now" in msg_lower or "listening now" in msg_lower:
+            status_dot.bgcolor = "#EC4899"  # Hot pink active recording
             btn_icon.icon = ft.Icons.MIC_ROUNDED
             btn_icon.color = "#EC4899"
-        elif "analyz" in msg_lower or "finaliz" in msg_lower or "process" in msg_lower:
-            status_dot.bgcolor = "#F59E0B"  # Amber for thinking
+            toggle_container.border = ft.Border.all(3.0, "#EC4899")
+            status_text.weight = ft.FontWeight.W_700
+            status_text.color = "#EC4899"
+
+            mini_dot.bgcolor = "#EC4899"
+            mini_icon.icon = ft.Icons.MIC_ROUNDED
+            mini_icon.color = "#EC4899"
+            mini_status_label.value = "Listening to you..."
+            mini_status_label.color = "#EC4899"
+        elif "incoming" in msg_lower or "speak" in msg_lower or "reading" in msg_lower or "proposing" in msg_lower:
+            status_dot.bgcolor = "#38BDF8"  # Cyan vocal output
+            btn_icon.icon = ft.Icons.RECORD_VOICE_OVER_ROUNDED
+            btn_icon.color = "#38BDF8"
+            toggle_container.border = ft.Border.all(2.5, "#38BDF8")
+            status_text.weight = ft.FontWeight.W_500
+            status_text.color = c["text_primary"]
+
+            mini_dot.bgcolor = "#38BDF8"
+            mini_icon.icon = ft.Icons.RECORD_VOICE_OVER_ROUNDED
+            mini_icon.color = "#38BDF8"
+            mini_status_label.value = "Speaking..."
+            mini_status_label.color = "#38BDF8"
+        elif "drafting" in msg_lower or "analyz" in msg_lower or "finaliz" in msg_lower or "process" in msg_lower or "understood" in msg_lower:
+            status_dot.bgcolor = "#F59E0B"  # Amber reasoning
             btn_icon.icon = ft.Icons.AUTO_AWESOME_ROUNDED
             btn_icon.color = "#F59E0B"
+            toggle_container.border = ft.Border.all(2.0, "#F59E0B")
+            status_text.weight = ft.FontWeight.W_500
+            status_text.color = c["text_primary"]
+
+            mini_dot.bgcolor = "#F59E0B"
+            mini_icon.icon = ft.Icons.AUTO_AWESOME_ROUNDED
+            mini_icon.color = "#F59E0B"
+            mini_status_label.value = "Drafting with Muse Spark..."
+            mini_status_label.color = "#F59E0B"
         elif sentinel.is_running:
             status_dot.bgcolor = c["idle_icon"]
             btn_icon.icon = ft.Icons.STOP_ROUNDED
             btn_icon.color = c["active_icon"]
+            toggle_container.border = ft.Border.all(1.5, c["active_border"])
+            status_text.weight = ft.FontWeight.W_400
+            status_text.color = c["text_muted"]
+
+            mini_dot.bgcolor = c["idle_icon"]
+            mini_icon.icon = ft.Icons.HEARING_ROUNDED
+            mini_icon.color = c["idle_icon"]
+            mini_status_label.value = "Listening"
+            mini_status_label.color = c["text_secondary"]
         else:
             status_dot.bgcolor = c["text_muted"]
             btn_icon.icon = ft.Icons.PLAY_ARROW_ROUNDED
             btn_icon.color = c["idle_icon"]
+            toggle_container.border = ft.Border.all(1.5, c["idle_border"])
+            status_text.weight = ft.FontWeight.W_400
+            status_text.color = c["text_muted"]
+
+            mini_dot.bgcolor = c["text_muted"]
+            mini_icon.icon = ft.Icons.RADIO_BUTTON_UNCHECKED_ROUNDED
+            mini_icon.color = c["text_muted"]
+            mini_status_label.value = "Idle"
+            mini_status_label.color = c["text_muted"]
         page.update()
 
     def on_task_completed(task: Optional[TaskRecord] = None) -> None:
+        nonlocal latest_response_text
         c = THEMES[current_theme]
         status_dot.bgcolor = "#10B981"
         status_text.value = "Response ready and copied (Cmd+V)"
+        status_text.weight = ft.FontWeight.W_600
+        status_text.color = "#10B981"
+        toggle_container.border = ft.Border.all(2.0, "#10B981")
         if sentinel.is_running:
             btn_icon.icon = ft.Icons.STOP_ROUNDED
             btn_icon.color = c["active_icon"]
+
+        mini_dot.bgcolor = "#10B981"
+        mini_icon.icon = ft.Icons.CHECK_CIRCLE_ROUNDED
+        mini_icon.color = "#10B981"
+        mini_status_label.value = "Ready (Cmd+V)"
+        mini_status_label.color = "#10B981"
 
         # Surface response directly in the central interface
         target_task = task
@@ -1214,6 +1664,8 @@ def create_app(page: ft.Page) -> None:
                 target_task = recent[0]
 
         if target_task and target_task.final_response:
+            latest_response_text = target_task.final_response
+            mini_copy_btn.visible = True
             response_sender_text.value = target_task.action_title
             response_body_text.value = target_task.final_response
             response_card.visible = True
@@ -1248,9 +1700,18 @@ def create_app(page: ft.Page) -> None:
             compact_toggle_icon.color = c["idle_icon"]
             compact_toggle_btn.tooltip = "Start listening"
 
+            mini_sentinel_icon.icon = ft.Icons.PLAY_ARROW_ROUNDED
+            mini_sentinel_icon.color = c["idle_icon"]
+            mini_sentinel_btn.tooltip = "Start listening"
+
             if not alert_banner.visible:
                 status_dot.bgcolor = c["text_muted"]
                 status_text.value = "Idle · Tap button to start listening"
+                mini_dot.bgcolor = c["text_muted"]
+                mini_icon.icon = ft.Icons.RADIO_BUTTON_UNCHECKED_ROUNDED
+                mini_icon.color = c["text_muted"]
+                mini_status_label.value = "Idle"
+                mini_status_label.color = c["text_muted"]
         else:
             btn_icon.icon = ft.Icons.STOP_ROUNDED
             btn_icon.size = 32
@@ -1263,8 +1724,17 @@ def create_app(page: ft.Page) -> None:
             compact_toggle_icon.color = c["active_icon"]
             compact_toggle_btn.tooltip = "Pause listening"
 
+            mini_sentinel_icon.icon = ft.Icons.STOP_ROUNDED
+            mini_sentinel_icon.color = c["active_icon"]
+            mini_sentinel_btn.tooltip = "Pause listening"
+
             status_dot.bgcolor = c["idle_icon"]
-            status_text.value = "Listening attentively on the Verso"
+            status_text.value = "Listening"
+            mini_dot.bgcolor = c["idle_icon"]
+            mini_icon.icon = ft.Icons.HEARING_ROUNDED
+            mini_icon.color = c["idle_icon"]
+            mini_status_label.value = "Listening"
+            mini_status_label.color = c["text_secondary"]
         page.update()
 
     sentinel = Sentinel(
@@ -1273,6 +1743,7 @@ def create_app(page: ft.Page) -> None:
         on_context_detected=on_context_detected,
         on_error=show_error,
         on_state_change=on_sentinel_state_change,
+        is_busy_fn=lambda: worker_manager.is_busy,
     )
 
     def toggle_listening(e):
@@ -1305,33 +1776,38 @@ def create_app(page: ft.Page) -> None:
             show_error("")
             NotificationService.notify(
                 title="V.E.R.S.O.",
-                message="Listening active for Slack intentions.",
+                message="Listening active.",
             )
         page.update()
 
     toggle_container.on_click = toggle_listening
     compact_toggle_btn.on_click = toggle_listening
+    mini_sentinel_btn.on_click = toggle_listening
 
     # Layout Assembly: Stack with Docked Base Row + Responsive Overlay Layer
-    page.add(
-        ft.Stack(
-            controls=[
-                # Base Layer: Row with Docked Left Pane + Main Companion View
-                ft.Row(
-                    controls=[
-                        docked_pane,
-                        main_view,
-                    ],
-                    expand=True,
-                    spacing=0,
-                ),
-                # Overlay Layer: Backdrop and Sliding Drawer (active only in narrow mode)
-                backdrop,
-                overlay_drawer,
-            ],
-            expand=True,
-        )
+    full_stack = ft.Stack(
+        controls=[
+            # Base Layer: Row with Docked Left Pane + Main Companion View
+            ft.Row(
+                controls=[
+                    docked_pane,
+                    main_view,
+                ],
+                expand=True,
+                spacing=0,
+            ),
+            # Overlay Layer: Backdrop and Sliding Drawer (active only in narrow mode)
+            backdrop,
+            overlay_drawer,
+        ],
+        expand=True,
     )
+
+    root_container = ft.Container(
+        content=full_stack,
+        expand=True,
+    )
+    page.add(root_container)
 
     # Initialize task history on startup
     render_history_items()

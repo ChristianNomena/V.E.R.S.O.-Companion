@@ -1,10 +1,11 @@
 """
 V.E.R.S.O. - Clipboard Sensor
-Monitors user clipboard updates cleanly without polling spikes.
+Monitors user clipboard updates cleanly without polling spikes or self-trigger loops.
 """
 
 import logging
-from typing import Optional
+import threading
+from typing import Optional, Set
 
 import pyperclip
 
@@ -12,12 +13,24 @@ logger = logging.getLogger(__name__)
 
 
 class ClipboardSensor:
-    """Monitors clipboard changes without polling storms."""
+    """Monitors clipboard changes without polling storms or self-triggering echo loops."""
+
+    _ignored_hashes: Set[int] = set()
+    _lock = threading.Lock()
+
+    @classmethod
+    def ignore_content(cls, text: str) -> None:
+        """Registers text as internally generated so the sensor ignores it when copied."""
+        if text and text.strip():
+            with cls._lock:
+                cls._ignored_hashes.add(hash(text.strip()))
 
     def __init__(self) -> None:
         self._last_content: str = ""
         try:
             self._last_content = pyperclip.paste() or ""
+            if self._last_content:
+                self.ignore_content(self._last_content)
         except Exception:
             self._last_content = ""
 
@@ -25,9 +38,18 @@ class ClipboardSensor:
         """Returns new clipboard text if changed since last check, else None."""
         try:
             current = pyperclip.paste()
-            if current and current != self._last_content:
+            if not current:
+                return None
+            cleaned = current.strip()
+            with self._lock:
+                if hash(cleaned) in self._ignored_hashes:
+                    self._last_content = current
+                    self._ignored_hashes.discard(hash(cleaned))
+                    return None
+
+            if current != self._last_content:
                 self._last_content = current
-                return current.strip()
+                return cleaned
         except Exception as exc:
             logger.warning("Error reading clipboard: %s", exc)
         return None

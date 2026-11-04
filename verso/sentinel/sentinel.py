@@ -25,16 +25,18 @@ class Sentinel:
     def __init__(
         self,
         poll_interval: float = 1.5,
-        cooldown_seconds: float = 20.0,
+        cooldown_seconds: float = 10.0,
         on_context_detected: Optional[Callable[[str, str], None]] = None,
         on_error: Optional[Callable[[str], None]] = None,
         on_state_change: Optional[Callable[[bool], None]] = None,
+        is_busy_fn: Optional[Callable[[], bool]] = None,
     ) -> None:
         self.poll_interval = poll_interval
         self.cooldown_seconds = cooldown_seconds
         self.on_context_detected = on_context_detected
         self.on_error = on_error
         self.on_state_change = on_state_change
+        self.is_busy_fn = is_busy_fn
 
         self.notification_sensor = NotificationSensor(on_error=self._handle_sensor_error)
         self.clipboard_sensor = ClipboardSensor()
@@ -112,7 +114,14 @@ class Sentinel:
             time.sleep(self.poll_interval)
 
     def _tick(self) -> None:
+        # If the assistant is currently speaking or processing a dialogue, never trigger new actions
+        if self.is_busy_fn and self.is_busy_fn():
+            return
+
         now = time.time()
+        # Cooldown guard: must wait at least cooldown_seconds between any two triggers
+        if now - self._last_trigger_time < self.cooldown_seconds:
+            return
 
         # 1. Highest Priority: Incoming Slack Notification from Notification Center or Browser
         slack_notifs = self.notification_sensor.get_new_slack_notifications()
@@ -122,9 +131,7 @@ class Sentinel:
             payload = f"From {sender}: {body}"
 
             cache_key = f"slack_notif:{notif.get('rec_id')}:{body}"
-            if (cache_key != self._last_detected_key) or (
-                now - self._last_trigger_time > self.cooldown_seconds
-            ):
+            if cache_key != self._last_detected_key:
                 self._last_detected_key = cache_key
                 self._last_trigger_time = now
                 if self.on_context_detected:
@@ -142,9 +149,7 @@ class Sentinel:
             )
 
             cache_key = f"{source}:{new_clipboard}"
-            if (cache_key != self._last_detected_key) or (
-                now - self._last_trigger_time > self.cooldown_seconds
-            ):
+            if cache_key != self._last_detected_key:
                 self._last_detected_key = cache_key
                 self._last_trigger_time = now
                 if self.on_context_detected:
@@ -159,7 +164,7 @@ class Sentinel:
         ):
             # Only trigger window context if it transitions significantly
             cache_key = f"window:{window_info.app_name}:{window_info.window_title}"
-            if (cache_key != self._last_detected_key) and (
+            if cache_key != self._last_detected_key and (
                 now - self._last_trigger_time > self.cooldown_seconds * 2
             ):
                 self._last_detected_key = cache_key
