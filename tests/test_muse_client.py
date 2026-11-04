@@ -195,6 +195,37 @@ class MuseClientTest(unittest.TestCase):
         self.assertEqual(session.post.call_count, 2)
         self.assertIs(session.post.call_args.kwargs["json"]["stream"], False)
 
+    def test_transcribe_audio_posts_multipart_and_returns_transcript(self):
+        import os
+        import tempfile
+
+        session = MagicMock()
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.json.return_value = {"transcript": "  Hello transcribed world  "}
+        session.post.return_value = resp
+        client = _make_client(session)
+
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            tmp.write(b"RIFFfake-wav-bytes")
+            wav_path = tmp.name
+        try:
+            text = client.transcribe_audio(wav_path)
+        finally:
+            os.unlink(wav_path)
+
+        self.assertEqual(text, "Hello transcribed world")
+        url = session.post.call_args.args[0]
+        self.assertEqual(url, "https://api.meta.ai/v1/asr/transcribe")
+        files = session.post.call_args.kwargs["files"]
+        request_part = files["request"][1]
+        import json as json_module
+
+        request_json = json_module.loads(request_part)
+        self.assertEqual(request_json["model"], "muse-voice-transcribe-1.0")
+        self.assertEqual(request_json["audioEncoding"], "WAV")
+        self.assertIn("audio", files)
+
     def test_api_failure_falls_back_without_raising(self):
         session = MagicMock()
         session.post.side_effect = Exception("boom")

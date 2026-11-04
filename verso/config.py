@@ -27,6 +27,8 @@ META_MUSE_ENDPOINT: str = os.getenv("META_MUSE_ENDPOINT", "").strip() or DEFAULT
 # Muse generation tuning (cost/latency optimized defaults)
 # Default model follows the official Meta API example.
 MUSE_MODEL: str = os.getenv("MUSE_MODEL", "muse-wonder-1.0")
+# Dedicated speech-to-text model (Muse Voice Transcribe) for vocal replies.
+MUSE_TRANSCRIBE_MODEL: str = os.getenv("MUSE_TRANSCRIBE_MODEL", "muse-voice-transcribe-1.0")
 MUSE_TEMPERATURE: float = float(os.getenv("MUSE_TEMPERATURE", "0.3"))
 MUSE_REASONING_EFFORT: str = os.getenv("MUSE_REASONING_EFFORT", "minimal")
 MUSE_MAX_TOKENS_SUGGESTION: int = int(os.getenv("MUSE_MAX_TOKENS_SUGGESTION", "800"))

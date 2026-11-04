@@ -318,6 +318,25 @@ class TTSServiceTest(unittest.TestCase):
         proc.kill.assert_called_once()
         self.assertFalse(STTService._is_recording)
 
+    def test_stt_prefers_muse_voice_transcribe_then_google(self):
+        from verso.services.stt_service import STTService
+
+        with patch.object(
+            STTService, "_transcribe_muse", return_value="muse transcript"
+        ) as muse_mock, patch.object(
+            STTService, "_transcribe_google", return_value="google transcript"
+        ) as google_mock:
+            self.assertEqual(STTService._transcribe("/tmp/x.wav"), "muse transcript")
+            muse_mock.assert_called_once()
+            google_mock.assert_not_called()
+
+        with patch.object(
+            STTService, "_transcribe_muse", return_value=""
+        ), patch.object(
+            STTService, "_transcribe_google", return_value="google transcript"
+        ):
+            self.assertEqual(STTService._transcribe("/tmp/x.wav"), "google transcript")
+
     def test_empty_text_completes_without_speaking(self):
         popen = self._patch("subprocess.Popen")
         done = threading.Event()

@@ -988,7 +988,7 @@ def create_app(page: ft.Page) -> None:
         tooltip="Spontaneous suggestions: ON (click to disable)",
     )
 
-    mini_ask_icon = ft.Icon(icon=ft.Icons.FORUM_ROUNDED, size=13, color=colors["idle_icon"])
+    mini_ask_icon = ft.Icon(icon=ft.Icons.QUESTION_MARK_ROUNDED, size=13, color=colors["idle_icon"])
     mini_ask_btn = ft.Container(
         content=mini_ask_icon,
         width=26,
@@ -998,7 +998,7 @@ def create_app(page: ft.Page) -> None:
         border=ft.Border.all(1, colors["top_btn_border"]),
         alignment=ft.Alignment(0, 0),
         ink=True,
-        tooltip="Chat with V.E.R.S.O. / Ask what it thinks",
+        tooltip="Ask V.E.R.S.O.: What do you think?",
     )
 
     # Primary widget action: back to the full window (accent filled, always visible).
@@ -1095,7 +1095,7 @@ def create_app(page: ft.Page) -> None:
     )
     set_mini_hover(
         mini_ask_btn,
-        lambda: "Chat with AI" if (sentinel and sentinel.is_running) else "Needs PLAY",
+        lambda: "Ask AI" if (sentinel and sentinel.is_running) else "Needs PLAY",
     )
     set_mini_hover(
         mini_expand_btn,
@@ -3235,6 +3235,9 @@ def create_app(page: ft.Page) -> None:
         c = THEMES[current_theme]
         add_chat_bubble(question, is_user=True)
         companion_status_text.value = "V.E.R.S.O. is thinking..."
+        if is_mini_mode:
+            mini_status_label.value = "Thinking..."
+            mini_status_label.color = c["idle_icon"]
 
         # Provide immediate tactile feedback on send button
         companion_chat_send_btn.opacity = 0.5
@@ -3326,7 +3329,9 @@ def create_app(page: ft.Page) -> None:
             companion_ask_btn.disabled = False
             mini_ask_btn.content = mini_ask_icon
             mini_ask_btn.disabled = False
+            latest_response_text = answer
             _restore_companion_status()
+            _restore_mini_status()
 
             if (
                 is_voice_enabled
@@ -3393,9 +3398,7 @@ def create_app(page: ft.Page) -> None:
             threading.Thread(target=reset_mini_warn, daemon=True).start()
             return
 
-        if is_mini_mode:
-            exit_mini_mode()
-        ask_companion_now()
+        run_companion_question("What do you think?")
 
     def send_quick_ask(e=None) -> None:
         if sentinel is None or not sentinel.is_running:

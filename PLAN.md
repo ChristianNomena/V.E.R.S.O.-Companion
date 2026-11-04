@@ -25,7 +25,7 @@
 │                                                                        │
 │   Voice Mode: ACTIVE                      Voice Mode: DEACTIVATED      │
 │   ├── Vocal TTS (macOS "say")             ├── 3 AI Quick Reply Buttons │
-│   └── Vocal STT (Google en-US)            ├── "Need another response?" │
+│   └── Vocal STT (Muse Voice Transcribe)   ├── "Need another response?" │
 │                                           └── Custom Input with Muse   │
 └──────────────────┬─────────────────────────────────┬───────────────────┘
                    │                                 │
@@ -54,7 +54,7 @@
   - `pyperclip` (clipboard sensor & 1-click copy)
   - `requests` (cognitive REST API communication)
   - `python-dotenv` (environment configuration)
-  - `SpeechRecognition` (Google STT service in en-US)
+  - `SpeechRecognition` (Google STT fallback in en-US; primary transcription is Muse Voice Transcribe via the Meta Model API)
 - [x] Establish modular architecture under `verso/`:
   - `database/`: SQLModel models and database repository
   - `sentinel/`: Ambient notification and clipboard observation sensors
@@ -160,7 +160,7 @@
   - 1-click response re-copy button.
 
 ### Phase 8: Automated Verification & Test Suite
-- [x] Comprehensive test coverage with 65 automated tests across `tests/`:
+- [x] Comprehensive test coverage with 67 automated tests across `tests/`:
   - `tests/test_vocal_and_quick_modes.py`:
     * Voice Mode active/deactivated toggle state verification
     * Quick reply selection, background execution, and DB persistence
@@ -211,7 +211,7 @@ V.E.R.S.O.-Companion/
 │   │   ├── muse_client.py      # Meta Muse API client with resilient fallbacks
 │   │   ├── notification_service.py # Native macOS desktop notification dispatch
 │   │   ├── sound_service.py    # macOS system sound chime triggers
-│   │   ├── stt_service.py      # Google Speech-to-Text recognizer (en-US)
+│   │   ├── stt_service.py      # Microphone capture + Muse Voice Transcribe (Google fallback)
 │   │   └── tts_service.py      # macOS native speech synthesizer ("say" - Samantha)
 │   ├── workers/
 │   │   ├── __init__.py

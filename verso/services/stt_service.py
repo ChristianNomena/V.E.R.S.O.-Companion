@@ -1,7 +1,9 @@
 """
 V.E.R.S.O. - Speech-to-Text (STT) Service
-Records user vocal input via microphone, detects live voice activity in real time,
-and transcribes speech locally (zero Muse API cost; uses SpeechRecognition when available).
+Records user vocal input via microphone, detects live voice activity in real
+time, and transcribes the recording with Muse Voice Transcribe
+(``muse-voice-transcribe-1.0``). Google SpeechRecognition remains as an
+offline fallback when the Muse API is unconfigured or unreachable.
 """
 
 import logging
@@ -38,11 +40,53 @@ def _calculate_rms(chunk: bytes) -> int:
 
 
 class STTService:
-    """Captures user speech from microphone and transcribes it locally."""
+    """Captures user speech from the microphone and transcribes it.
+
+    Primary transcriber: Muse Voice Transcribe (Meta Model API).
+    Fallback: Google SpeechRecognition when Muse is unavailable.
+    """
 
     _is_recording: bool = False
     _record_process: Optional[subprocess.Popen] = None
     SPEECH_RMS_THRESHOLD: int = 350
+    _muse_client = None
+
+    @classmethod
+    def _get_muse_client(cls):
+        if cls._muse_client is None:
+            from verso.services.muse_client import MuseClient
+
+            cls._muse_client = MuseClient()
+        return cls._muse_client
+
+    @classmethod
+    def _transcribe_muse(cls, wav_path: str) -> str:
+        """Transcribes with Muse Voice Transcribe; '' when unavailable."""
+        try:
+            text = cls._get_muse_client().transcribe_audio(wav_path)
+            return (text or "").strip()
+        except Exception as exc:
+            logger.warning("Muse Voice Transcribe failed, falling back: %s", exc)
+            return ""
+
+    @classmethod
+    def _transcribe_google(cls, wav_path: str) -> str:
+        """Offline fallback transcriber (Google via SpeechRecognition)."""
+        try:
+            import speech_recognition as sr
+
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(wav_path) as source:
+                audio_data = recognizer.record(source)
+                return (recognizer.recognize_google(audio_data, language="en-US") or "").strip()
+        except Exception as exc:
+            logger.debug("Google speech recognition note: %s", exc)
+            return ""
+
+    @classmethod
+    def _transcribe(cls, wav_path: str) -> str:
+        """Muse Voice Transcribe first, Google as fallback."""
+        return cls._transcribe_muse(wav_path) or cls._transcribe_google(wav_path)
 
     @classmethod
     def stop(cls) -> None:
@@ -175,19 +219,12 @@ class STTService:
                 except Exception:
                     pass
 
-        # 2. Transcribe user speech using SpeechRecognition
+        # 2. Transcribe user speech (Muse Voice Transcribe, Google fallback)
         transcription = ""
         if recorded:
-            try:
-                import speech_recognition as sr
-
-                recognizer = sr.Recognizer()
-                with sr.AudioFile(temp_audio) as source:
-                    audio_data = recognizer.record(source)
-                    transcription = recognizer.recognize_google(audio_data, language="en-US")
-                    logger.info("Transcribed user vocal reply: %s", transcription)
-            except Exception as sr_exc:
-                logger.debug("Speech recognition note: %s", sr_exc)
+            transcription = cls._transcribe(temp_audio)
+            if transcription:
+                logger.info("Transcribed user vocal reply: %s", transcription)
 
         # Fallback if no speech recognized or silence detected
         if not transcription:

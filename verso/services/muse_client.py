@@ -26,6 +26,7 @@ import os
 import re
 import threading
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 import requests
@@ -42,6 +43,7 @@ from verso.config import (
     MUSE_MAX_TOKENS_FINALIZE,
     MUSE_MAX_TOKENS_SUGGESTION,
     MUSE_MODEL,
+    MUSE_TRANSCRIBE_MODEL,
     MUSE_REASONING_EFFORT,
     MUSE_TEMPERATURE,
     MUSE_TIMEOUT,
@@ -288,6 +290,63 @@ class MuseClient:
         if base.endswith("/responses"):
             return base
         return f"{base}/responses"
+
+    @property
+    def transcribe_endpoint(self) -> str:
+        """Returns the Muse Voice Transcribe URL (``{base}/asr/transcribe``)."""
+        base = (self.endpoint or "https://api.meta.ai/v1").rstrip("/")
+        if base.endswith("/chat/completions"):
+            base = base[: -len("/chat/completions")]
+        if base.endswith("/responses"):
+            base = base[: -len("/responses")]
+        if base.endswith("/asr/transcribe"):
+            return base
+        return f"{base}/asr/transcribe"
+
+    def transcribe_audio(self, wav_path: str, session_id: Optional[str] = None) -> str:
+        """Transcribes a WAV recording with Muse Voice Transcribe.
+
+        Sends the official multipart request (JSON ``request`` part + WAV
+        ``audio`` part) to ``POST {base}/asr/transcribe`` and returns the
+        transcript text. Raises on missing credentials, transport, or HTTP
+        errors so callers can fall back to another transcriber.
+        The WAV must be mono 16-bit PCM at 16 kHz or 24 kHz.
+        """
+        if not self.is_configured:
+            raise ValueError("Muse API is not configured (missing API key or endpoint)")
+        if not wav_path or not os.path.isfile(wav_path):
+            raise ValueError(f"Audio file not found: {wav_path}")
+
+        request_payload = {
+            "mode": "PUSH_TO_TALK",
+            "model": MUSE_TRANSCRIBE_MODEL,
+            "audioEncoding": "WAV",
+            "languageBias": ["English"],
+        }
+        with open(wav_path, "rb") as audio_handle:
+            files = {
+                "request": (None, json.dumps(request_payload), "application/json"),
+                "audio": (os.path.basename(wav_path), audio_handle, "audio/wav"),
+            }
+            resp = self._session.post(
+                self.transcribe_endpoint,
+                files=files,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                params={"sessionId": session_id or uuid.uuid4().hex},
+                timeout=max(self.timeout, 30.0),
+            )
+        resp.raise_for_status()
+        data = resp.json() or {}
+        transcript = str(data.get("transcript") or "").strip()
+        if not transcript and isinstance(data.get("turns"), list):
+            transcript = " ".join(
+                str(turn.get("transcript") or "").strip()
+                for turn in data["turns"]
+                if isinstance(turn, dict)
+            ).strip()
+        if not transcript:
+            raise ValueError("Muse Voice Transcribe returned an empty transcript")
+        return transcript
 
     # -- Transport -----------------------------------------------------
 

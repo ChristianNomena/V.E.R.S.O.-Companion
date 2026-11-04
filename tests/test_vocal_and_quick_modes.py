@@ -492,8 +492,9 @@ class TestVocalAndQuickModes(unittest.TestCase):
         self.assertTrue(any("Voice replies" in t for t in tooltips))
         self.assertTrue(any("consented observation" in t.lower() for t in tooltips))
         self.assertTrue(any("Spontaneous suggestions" in t for t in tooltips))
-        self.assertTrue(any("Chat with V.E.R.S.O." in t for t in tooltips))
+        self.assertTrue(any("Ask V.E.R.S.O." in t for t in tooltips))
         self.assertTrue(any("Back to full window" in t for t in tooltips))
+        self.assertEqual(mini_ask_btn.content.icon, ft.Icons.QUESTION_MARK_ROUNDED)
 
         # Explicit Exclusion: NO light/dark theme toggle in widget mode
         self.assertFalse(any("Light Mode" in t or "Dark Mode" in t for t in tooltips))
@@ -550,11 +551,17 @@ class TestVocalAndQuickModes(unittest.TestCase):
         self.assertEqual(mini_status_label.value, "Start observe")
         mini_observe_btn.on_hover(mock_hover_out)
 
-        # 7. Now that PLAY is active, mini_ask_btn successfully exits widget mode and opens chat
-        mini_ask_btn.on_click(None)
-        self.assertEqual(self.root.content, self.full_stack)
-        chat_drawer = self.full_stack.controls[3]
-        self.assertEqual(chat_drawer.right, 0)
+        # 7. Hover on mini_ask_btn reflects "Ask AI" when listening
+        mini_ask_btn.on_hover(mock_hover_in)
+        self.assertEqual(mini_status_label.value, "Ask AI")
+        mini_ask_btn.on_hover(mock_hover_out)
+
+        # 8. Now that PLAY is active, mini_ask_btn triggers Ask directly in widget mode
+        with patch("verso.companion.observer.CompanionObserver.ask", return_value="Widget advice"):
+            mini_ask_btn.on_click(None)
+        # Stays in widget mode (does not kick user to full window chat)
+        self.assertNotEqual(self.root.content, self.full_stack)
+        self.assertIn(mini_status_label.value, ["Thinking...", "Ready (Cmd+V)", "Listening"])
 
     def test_voice_speaking_state_wave_and_contour(self):
         # 1. Switch to widget mode so we can inspect both full window and widget controls
